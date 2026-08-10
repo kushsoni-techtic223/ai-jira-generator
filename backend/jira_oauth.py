@@ -353,9 +353,18 @@ def complete_login(code: str, state: str | None) -> tuple[dict[str, Any], str]:
 
     resources = fetch_accessible_resources(access_token)
     if not resources:
+        preferred = (os.getenv("JIRA_BASE_URL") or "").rstrip("/")
+        hint = (
+            f" Your team site is {preferred}."
+            if preferred
+            else ""
+        )
         raise OAuthError(
-            "No Jira Cloud sites available for this account. "
-            "Ask a site admin to grant you access to Jira, then authorize again."
+            "No Jira Cloud sites available for this Atlassian account."
+            + hint
+            + " Use your @techtic.agency work account (not a personal Gmail Atlassian account), "
+            "ask a Jira admin to invite you to the site, then Connect again. "
+            "Also ensure the OAuth app has Distribution → Sharing enabled."
         )
 
     user_email = None
@@ -370,7 +379,32 @@ def complete_login(code: str, state: str | None) -> tuple[dict[str, Any], str]:
         # read:me may not be granted yet — resolve via Jira issues below
         pass
 
+    # Prefer company site (JIRA_BASE_URL) over personal/other Cloud sites
+    preferred_url = (os.getenv("JIRA_BASE_URL") or "").rstrip("/").lower()
     site = resources[0]
+    if preferred_url:
+        match = next(
+            (
+                r
+                for r in resources
+                if (r.get("url") or "").rstrip("/").lower() == preferred_url
+                or preferred_url in (r.get("url") or "").lower()
+            ),
+            None,
+        )
+        if match:
+            site = match
+        else:
+            available = ", ".join(
+                (r.get("name") or r.get("url") or "?") for r in resources[:5]
+            )
+            raise OAuthError(
+                f"This Atlassian account is not a member of {preferred_url}. "
+                f"Sites on this account: {available or 'none'}. "
+                "Log in with the work account that can open that Jira site "
+                "(invite required from a site admin)."
+            )
+
     expires_in = int(tokens.get("expires_in") or 3600)
     session = {
         "access_token": access_token,

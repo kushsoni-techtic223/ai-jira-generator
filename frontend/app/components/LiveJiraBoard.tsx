@@ -106,10 +106,11 @@ export default function LiveJiraBoard() {
   const [selected, setSelected] = useState<SelectedTicket | null>(null);
   const [tokenForm, setTokenForm] = useState({
     base_url: "https://techticsolutions.atlassian.net",
-    email: "kushsoni@techtic.agency",
+    email: "",
     api_token: ""
   });
   const [connectingToken, setConnectingToken] = useState(false);
+  const [selectingSite, setSelectingSite] = useState(false);
   const [emailPreview, setEmailPreview] = useState<DailyEmailPreview | null>(null);
   const [preparingEmail, setPreparingEmail] = useState(false);
   const [sendingEmail, setSendingEmail] = useState(false);
@@ -291,6 +292,28 @@ export default function LiveJiraBoard() {
       );
     } finally {
       setConnectingToken(false);
+    }
+  };
+
+  const selectSite = async (cloudId: string) => {
+    setSelectingSite(true);
+    setError(null);
+    try {
+      await axios.post(
+        `${API}/auth/jira/site`,
+        { cloud_id: cloudId },
+        { headers: jiraAuthHeaders() }
+      );
+      await refreshAuth();
+      setProjects([]);
+      setData(null);
+      await loadProjects();
+    } catch (err: any) {
+      setError(
+        err?.response?.data?.detail || err?.message || "Could not switch site"
+      );
+    } finally {
+      setSelectingSite(false);
     }
   };
 
@@ -576,12 +599,13 @@ export default function LiveJiraBoard() {
               Connect with Jira (OAuth)
             </a>
             <p className="text-xs text-slate-500">
-              OAuth must use the account that can open{" "}
+              Each person must use their own Atlassian{" "}
+              <strong>work</strong> account that can open{" "}
               <code className="rounded bg-slate-100 px-1">
                 techticsolutions.atlassian.net
-              </code>{" "}
-              (work email). In Developer Console enable Jira scopes{" "}
-              <strong>and</strong> User identity → <code>read:me</code>. Callback:{" "}
+              </code>
+              . Personal Gmail Atlassian logins will fail. Admin: enable{" "}
+              <strong>Distribution → Sharing</strong> on the OAuth app. Callback:{" "}
               <code className="rounded bg-slate-100 px-1">
                 {auth?.redirect_uri ||
                   auth?.setup?.redirect_uri ||
@@ -673,6 +697,27 @@ export default function LiveJiraBoard() {
         ) : (
           <div className="space-y-4">
             <div className="flex flex-wrap items-end gap-3">
+              {(auth.resources?.length || 0) > 1 && (
+                <div className="min-w-[200px]">
+                  <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">
+                    Jira site
+                  </label>
+                  <select
+                    value={auth.cloud_id || ""}
+                    disabled={selectingSite}
+                    onChange={(e) => {
+                      if (e.target.value) void selectSite(e.target.value);
+                    }}
+                    className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-teal-500 focus:ring-2 focus:ring-teal-100"
+                  >
+                    {(auth.resources || []).map((r) => (
+                      <option key={r.id} value={r.id}>
+                        {r.name || r.url || r.id}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
               <div className="min-w-[220px] flex-1">
                 <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">
                   Your projects
