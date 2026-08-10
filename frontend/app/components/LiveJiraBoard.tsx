@@ -17,6 +17,7 @@ import {
   jiraStatusPillStyle
 } from "../types";
 import {
+  getJiraSessionId,
   jiraAuthHeaders,
   setJiraSessionId
 } from "../lib/jiraSession";
@@ -175,7 +176,6 @@ export default function LiveJiraBoard() {
     const sid = params.get("sid");
     if (sid) {
       setJiraSessionId(sid);
-      // Clean sid from URL without losing tab
       params.delete("sid");
       params.delete("jira");
       const next = params.toString();
@@ -186,9 +186,25 @@ export default function LiveJiraBoard() {
       );
     }
 
-    refreshAuth().then((status) => {
-      if (status?.connected) loadProjects();
-    });
+    // Pass sid explicitly so status works even before localStorage settles
+    const boot = async () => {
+      setLoadingAuth(true);
+      try {
+        const headers: Record<string, string> = {};
+        const activeSid = sid || getJiraSessionId();
+        if (activeSid) headers["X-Jira-Session"] = activeSid;
+        const res = await axios.get<AuthStatus>(`${API}/auth/jira/status`, {
+          headers,
+        });
+        setAuth(res.data);
+        if (res.data.connected) await loadProjects();
+      } catch {
+        setAuth({ connected: false, oauth_configured: false });
+      } finally {
+        setLoadingAuth(false);
+      }
+    };
+    void boot();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 

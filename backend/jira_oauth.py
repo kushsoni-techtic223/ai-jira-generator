@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import os
 import secrets
 import time
@@ -52,6 +54,40 @@ def oauth_env() -> dict[str, str]:
         ),
         "scopes": os.getenv("JIRA_OAUTH_SCOPES") or DEFAULT_SCOPES,
     }
+
+
+def _state_secret() -> bytes:
+    env = oauth_env()
+    raw = (env["client_secret"] or env["client_id"] or "dev-state").encode("utf-8")
+    return raw
+
+
+def make_signed_state(session_id: str) -> str:
+    """
+    Encode session_id in OAuth state with HMAC so callback works even if
+    Railway ephemeral disk drops oauth_states.json between login and return.
+    """
+    nonce = secrets.token_urlsafe(12)
+    payload = f"{session_id}.{nonce}"
+    sig = hmac.new(_state_secret(), payload.encode("utf-8"), hashlib.sha256).hexdigest()[
+        :32
+    ]
+    return f"{payload}.{sig}"
+
+
+def parse_signed_state(state: str | None) -> str | None:
+    if not state or state.count(".") < 2:
+        return None
+    session_id, nonce, sig = state.rsplit(".", 2)
+    if not session_id or not nonce or not sig:
+        return None
+    payload = f"{session_id}.{nonce}"
+    expected = hmac.new(
+        _state_secret(), payload.encode("utf-8"), hashlib.sha256
+    ).hexdigest()[:32]
+    if not hmac.compare_digest(sig, expected):
+        return None
+    return session_id
 
 
 def oauth_configured() -> bool:
@@ -179,8 +215,12 @@ def build_authorize_url(session_id: str | None = None) -> tuple[str, str]:
             + ". See /auth/jira/setup for the full checklist."
         )
     sid = session_id or session_store.new_session_id()
-    state = secrets.token_urlsafe(24)
-    session_store.save_oauth_state(state, sid)
+    state = make_signed_state(sid)
+    # Best-effort file mirror (helps local multi-tab); signed state is source of truth
+    try:
+        session_store.save_oauth_state(state, sid)
+    except OSError:
+        pass
     params = {
         "audience": "api.atlassian.com",
         "client_id": env["client_id"],
@@ -293,7 +333,16 @@ def fetch_user_profile(access_token: str) -> dict[str, Any]:
 
 
 def complete_login(code: str, state: str | None) -> tuple[dict[str, Any], str]:
-    session_id = session_store.pop_oauth_state(state)
+    # Prefer HMAC-signed state (works without durable disk on Railway).
+    session_id = parse_signed_state(state)
+    if not session_id:
+        session_id = session_store.pop_oauth_state(state)
+    else:
+        # Clear file mirror if present
+        try:
+            session_store.pop_oauth_state(state)
+        except OSError:
+            pass
     if not session_id:
         raise OAuthError("Invalid OAuth state. Start login again from the app.")
 

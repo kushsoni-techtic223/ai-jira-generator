@@ -43,7 +43,12 @@ _FRONTEND = (os.getenv("FRONTEND_URL") or "http://localhost:3000").rstrip("/")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[_FRONTEND, "http://localhost:3000", "http://127.0.0.1:3000"],
+    allow_origins=[
+        _FRONTEND,
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+    ],
+    allow_origin_regex=r"https://.*\.up\.railway\.app",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -263,7 +268,7 @@ def jira_oauth_login(request: Request):
         # Optional: resume same browser session id from query
         sid = request.query_params.get("sid") or None
         url, sid = jira_oauth.build_authorize_url(sid)
-        return RedirectResponse(url)
+        return RedirectResponse(url, status_code=302)
     except Exception as exc:
         _handle_jira_errors(exc)
 
@@ -279,17 +284,24 @@ def jira_oauth_callback(
     frontend = jira_oauth.oauth_env()["frontend_url"]
     if error:
         msg = jira_oauth.friendly_oauth_error(error, error_description)
-        return RedirectResponse(f"{frontend}?tab=live&jira_error={quote(msg)}")
+        return RedirectResponse(
+            f"{frontend}?tab=live&jira_error={quote(msg)}", status_code=302
+        )
     if not code:
-        return RedirectResponse(f"{frontend}?tab=live&jira_error=missing_code")
+        return RedirectResponse(
+            f"{frontend}?tab=live&jira_error=missing_code", status_code=302
+        )
     try:
         _session, sid = jira_oauth.complete_login(code, state)
         return RedirectResponse(
-            f"{frontend}?tab=live&jira=connected&sid={quote(sid)}"
+            f"{frontend}?tab=live&jira=connected&sid={quote(sid)}",
+            status_code=302,
         )
     except Exception as exc:
         msg = str(exc)
-        return RedirectResponse(f"{frontend}?tab=live&jira_error={quote(msg)}")
+        return RedirectResponse(
+            f"{frontend}?tab=live&jira_error={quote(msg)}", status_code=302
+        )
 
 
 @app.get("/auth/jira/status")
@@ -1272,7 +1284,7 @@ def github_oauth_login(request: Request):
     try:
         sid = request.query_params.get("sid") or None
         url, _sid = github_oauth.build_authorize_url(sid)
-        return RedirectResponse(url)
+        return RedirectResponse(url, status_code=302)
     except Exception as exc:
         _handle_github_errors(exc)
 
@@ -1287,17 +1299,23 @@ def github_oauth_callback(
     frontend = github_oauth.oauth_env()["frontend_url"]
     if error:
         msg = error_description or error or "GitHub OAuth denied"
-        return RedirectResponse(f"{frontend}?tab=github&github_error={quote(msg)}")
+        return RedirectResponse(
+            f"{frontend}?tab=github&github_error={quote(msg)}", status_code=302
+        )
     if not code:
-        return RedirectResponse(f"{frontend}?tab=github&github_error=missing_code")
+        return RedirectResponse(
+            f"{frontend}?tab=github&github_error=missing_code", status_code=302
+        )
     try:
         _session, sid = github_oauth.complete_login(code, state)
         return RedirectResponse(
-            f"{frontend}?tab=github&github=connected&gh_sid={quote(sid)}"
+            f"{frontend}?tab=github&github=connected&gh_sid={quote(sid)}",
+            status_code=302,
         )
     except Exception as exc:
         return RedirectResponse(
-            f"{frontend}?tab=github&github_error={quote(str(exc))}"
+            f"{frontend}?tab=github&github_error={quote(str(exc))}",
+            status_code=302,
         )
 
 

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import os
 import secrets
 import time
@@ -38,6 +40,35 @@ def oauth_env() -> dict[str, str]:
         ),
         "scopes": (os.getenv("GITHUB_OAUTH_SCOPES") or DEFAULT_SCOPES).strip(),
     }
+
+
+def _state_secret() -> bytes:
+    env = oauth_env()
+    return (env["client_secret"] or env["client_id"] or "gh-dev-state").encode("utf-8")
+
+
+def make_signed_state(session_id: str) -> str:
+    nonce = secrets.token_urlsafe(12)
+    payload = f"{session_id}.{nonce}"
+    sig = hmac.new(_state_secret(), payload.encode("utf-8"), hashlib.sha256).hexdigest()[
+        :32
+    ]
+    return f"{payload}.{sig}"
+
+
+def parse_signed_state(state: str | None) -> str | None:
+    if not state or state.count(".") < 2:
+        return None
+    session_id, nonce, sig = state.rsplit(".", 2)
+    if not session_id or not nonce or not sig:
+        return None
+    payload = f"{session_id}.{nonce}"
+    expected = hmac.new(
+        _state_secret(), payload.encode("utf-8"), hashlib.sha256
+    ).hexdigest()[:32]
+    if not hmac.compare_digest(sig, expected):
+        return None
+    return session_id
 
 
 def oauth_configured() -> bool:
@@ -87,8 +118,11 @@ def build_authorize_url(session_id: str | None = None) -> tuple[str, str]:
         )
     env = oauth_env()
     sid = session_id or gh_sessions.new_session_id()
-    state = secrets.token_urlsafe(24)
-    gh_sessions.save_oauth_state(state, sid)
+    state = make_signed_state(sid)
+    try:
+        gh_sessions.save_oauth_state(state, sid)
+    except OSError:
+        pass
     params = {
         "client_id": env["client_id"],
         "redirect_uri": env["redirect_uri"],
@@ -162,7 +196,14 @@ def fetch_user(access_token: str) -> dict[str, Any]:
 
 
 def complete_login(code: str, state: str | None) -> tuple[dict[str, Any], str]:
-    sid = gh_sessions.pop_oauth_state(state)
+    sid = parse_signed_state(state)
+    if not sid:
+        sid = gh_sessions.pop_oauth_state(state)
+    else:
+        try:
+            gh_sessions.pop_oauth_state(state)
+        except OSError:
+            pass
     if not sid:
         raise GitHubOAuthError("Invalid or expired OAuth state. Try Connect again.")
     token_payload = exchange_code(code)
