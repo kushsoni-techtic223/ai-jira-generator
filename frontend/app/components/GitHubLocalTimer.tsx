@@ -422,13 +422,34 @@ export default function GitHubLocalTimer({
     try {
       const html = preview.html || "";
       const text = preview.text_body || "";
-      if (navigator.clipboard && "write" in navigator.clipboard && html) {
-        await navigator.clipboard.write([
-          new ClipboardItem({
-            "text/html": new Blob([html], { type: "text/html" }),
-            "text/plain": new Blob([text], { type: "text/plain" }),
-          }),
-        ]);
+      try {
+        if (navigator.clipboard && "write" in navigator.clipboard && html) {
+          await navigator.clipboard.write([
+            new ClipboardItem({
+              "text/html": new Blob([html], { type: "text/html" }),
+              "text/plain": new Blob([text], { type: "text/plain" }),
+            }),
+          ]);
+        }
+      } catch {
+        // optional
+      }
+      const localApi =
+        API.includes("localhost") || API.includes("127.0.0.1");
+      if (!localApi) {
+        const toPath = (preview.to || []).join(",");
+        const q: string[] = [];
+        if (preview.cc?.length)
+          q.push(`cc=${encodeURIComponent(preview.cc.join(","))}`);
+        q.push(`subject=${encodeURIComponent(preview.subject || "")}`);
+        const body =
+          text.length > 6000 ? `${text.slice(0, 6000)}\n\n[truncated]` : text;
+        q.push(`body=${encodeURIComponent(body)}`);
+        const a = document.createElement("a");
+        a.href = `mailto:${toPath}?${q.join("&")}`;
+        a.click();
+        alert("Mail should open. Press Cmd+V to paste the sheet if needed.");
+        return;
       }
       await axios.post(`${API}/reports/github-daily-email/open-mail-local`, {
         owner_key: ownerKey,

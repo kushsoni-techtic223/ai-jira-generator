@@ -10,6 +10,9 @@ import {
 } from "../lib/emailRecipients";
 
 import { API } from "../lib/api";
+
+const isLocalBackend =
+  API.includes("localhost") || API.includes("127.0.0.1");
 const STORAGE_KEY = "github-daily-connection-v3";
 
 type GithubProject = {
@@ -407,7 +410,33 @@ export default function GitHubDailyBoard() {
     if (!preview || !sessionId) return;
     setError(null);
     try {
-      await copyTemplate();
+      try {
+        await copyTemplate();
+      } catch {
+        // Clipboard optional
+      }
+      if (!isLocalBackend) {
+        const toPath = (preview.to || []).join(",");
+        const q: string[] = [];
+        if (preview.cc?.length)
+          q.push(`cc=${encodeURIComponent(preview.cc.join(","))}`);
+        q.push(`subject=${encodeURIComponent(preview.subject || "")}`);
+        const body =
+          (preview.text_body || "").length > 6000
+            ? `${(preview.text_body || "").slice(0, 6000)}\n\n[truncated]`
+            : preview.text_body || "";
+        q.push(`body=${encodeURIComponent(body)}`);
+        const a = document.createElement("a");
+        a.href = `mailto:${toPath}?${q.join("&")}`;
+        a.style.display = "none";
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        alert(
+          "Mail should open with To/Subject. Press Cmd+V to paste the formatted sheet."
+        );
+        return;
+      }
       await axios.post(
         `${API}/reports/github-daily-email/open-mail-app`,
         {
@@ -432,7 +461,11 @@ export default function GitHubDailyBoard() {
     if (!preview) return;
     setError(null);
     try {
-      await copyTemplate();
+      try {
+        await copyTemplate();
+      } catch {
+        // Clipboard optional
+      }
       const params = new URLSearchParams();
       params.set("view", "cm");
       params.set("fs", "1");

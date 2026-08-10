@@ -1,4 +1,5 @@
 import os
+import platform
 import shutil
 import smtplib
 import subprocess
@@ -949,10 +950,15 @@ def _build_daily_email_payload(
 
 def _open_draft_in_mac_mail(payload: dict[str, Any]) -> None:
     """
-    Open a NEW outgoing message in Apple Mail (compose with Send),
-    prefilled with subject/to/cc and the current template text body.
-    Also copies HTML to the system clipboard for optional rich paste (Cmd+V).
+    Open a NEW outgoing message in Apple Mail (compose with Send).
+    Only works when the backend runs on macOS (local Mac). Railway/Linux cannot do this.
     """
+    if platform.system() != "Darwin" or not shutil.which("osascript"):
+        raise jira.JiraConfigError(
+            "Open in Mac Mail only works when the backend runs on a Mac. "
+            "On the deployed site, use Open Gmail (or Copy template + paste)."
+        )
+
     subject = str(payload.get("subject") or "")
     to_csv = ",".join(payload.get("to") or [])
     cc_csv = ",".join(payload.get("cc") or [])
@@ -1041,6 +1047,11 @@ def _open_html_eml_in_mac_mail(payload: dict[str, Any], session: dict[str, Any])
     This preserves full template formatting unlike plain AppleScript content.
     Returns file path for debugging.
     """
+    if platform.system() != "Darwin":
+        raise jira.JiraConfigError(
+            "Open in Mac Mail only works when the backend runs on a Mac. "
+            "On the deployed site, use Open Gmail (or Copy template + paste)."
+        )
     msg = EmailMessage(policy=SMTP)
     msg["Subject"] = str(payload.get("subject") or "")
     # Mark as draft so Apple Mail opens compose window with Send button.

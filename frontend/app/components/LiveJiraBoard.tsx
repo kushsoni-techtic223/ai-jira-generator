@@ -407,25 +407,47 @@ export default function LiveJiraBoard() {
     document.body.removeChild(a);
   };
 
+  const copyEmailTemplate = async () => {
+    if (!emailPreview) return false;
+    const html = emailPreview.html || "";
+    const text = emailPreview.text_body || "";
+    try {
+      if (navigator.clipboard && "write" in navigator.clipboard && html) {
+        const item = new ClipboardItem({
+          "text/html": new Blob([html], { type: "text/html" }),
+          "text/plain": new Blob([text], { type: "text/plain" }),
+        });
+        await navigator.clipboard.write([item]);
+        return true;
+      }
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(text);
+        return true;
+      }
+    } catch {
+      // Clipboard can fail on some browsers without user gesture / permissions.
+    }
+    return false;
+  };
+
+  const isLocalBackend =
+    API.includes("localhost") || API.includes("127.0.0.1");
+
   const openMacMailDraft = async () => {
     if (!emailPreview) return;
     setError(null);
     try {
-      // Copy current formatted template, then open NEW Mail compose with text filled.
-      const html = emailPreview.html || "";
-      const text = emailPreview.text_body || "";
-      if (navigator.clipboard && "write" in navigator.clipboard && html) {
-        try {
-          const item = new ClipboardItem({
-            "text/html": new Blob([html], { type: "text/html" }),
-            "text/plain": new Blob([text], { type: "text/plain" }),
-          });
-          await navigator.clipboard.write([item]);
-        } catch {
-          await navigator.clipboard.writeText(text);
-        }
-      } else if (navigator.clipboard?.writeText) {
-        await navigator.clipboard.writeText(text);
+      const copied = await copyEmailTemplate();
+
+      // Deployed backend (Railway) cannot open Apple Mail — use mailto on the user's Mac.
+      if (!isLocalBackend) {
+        openMailtoDraft();
+        alert(
+          copied
+            ? "Mail app should open with To/Subject. Press Cmd+V in the body to paste the formatted sheet."
+            : "Mail app should open with To/Subject. Copy the template first if the body is empty."
+        );
+        return;
       }
 
       await axios.post(
@@ -446,23 +468,7 @@ export default function LiveJiraBoard() {
     if (!emailPreview) return;
     setError(null);
     try {
-      // Copy HTML once. Do NOT prefill Gmail body with plain text — that caused
-      // double Total/Regards when the formatted table was pasted on top.
-      const html = emailPreview.html || "";
-      const text = emailPreview.text_body || "";
-      if (navigator.clipboard && "write" in navigator.clipboard && html) {
-        try {
-          const item = new ClipboardItem({
-            "text/html": new Blob([html], { type: "text/html" }),
-            "text/plain": new Blob([text], { type: "text/plain" }),
-          });
-          await navigator.clipboard.write([item]);
-        } catch {
-          await navigator.clipboard.writeText(text);
-        }
-      } else if (navigator.clipboard?.writeText) {
-        await navigator.clipboard.writeText(text);
-      }
+      const copied = await copyEmailTemplate();
 
       const params = new URLSearchParams();
       params.set("view", "cm");
@@ -471,13 +477,16 @@ export default function LiveJiraBoard() {
       if (emailPreview.to.length) params.set("to", emailPreview.to.join(","));
       if (emailPreview.cc.length) params.set("cc", emailPreview.cc.join(","));
       params.set("su", emailPreview.subject);
-      // Leave body empty — paste with Cmd+V for a single formatted template.
       window.open(
         `https://mail.google.com/mail/?${params.toString()}`,
         "_blank",
         "noopener,noreferrer"
       );
-      alert("Gmail draft opened with To/Subject. Press Cmd+V in the body to paste the template.");
+      alert(
+        copied
+          ? "Gmail draft opened with To/Subject. Press Cmd+V in the body to paste the template."
+          : "Gmail opened. Use Copy template, then Cmd+V in the body."
+      );
     } catch (err: any) {
       setError(err?.message || "Could not open Gmail draft");
     }
@@ -902,7 +911,8 @@ export default function LiveJiraBoard() {
             </div>
             <div className="flex items-center justify-end gap-3 border-t border-slate-200 px-5 py-4">
               <span className="mr-auto text-xs text-slate-600">
-                Mac Mail: compose + text filled. Gmail: To/Subject filled — Cmd+V to paste table once.
+                Prefer Gmail on the deployed site. Mac Mail works fully only with a
+                local Mac backend — otherwise it opens mailto + paste (Cmd+V).
               </span>
               <button
                 type="button"
