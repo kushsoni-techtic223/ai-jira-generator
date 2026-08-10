@@ -21,7 +21,7 @@ import {
   setJiraSessionId
 } from "../lib/jiraSession";
 
-const API = "http://localhost:8000";
+import { API } from "../lib/api";
 
 const columnStyles: Record<BoardColumn, string> = {
   Highest: "border-t-red-500 bg-red-50/40",
@@ -569,7 +569,7 @@ export default function LiveJiraBoard() {
               <code className="rounded bg-slate-100 px-1">
                 {auth?.redirect_uri ||
                   auth?.setup?.redirect_uri ||
-                  "http://localhost:8000/callback"}
+                  `${API}/callback`}
               </code>
             </p>
 

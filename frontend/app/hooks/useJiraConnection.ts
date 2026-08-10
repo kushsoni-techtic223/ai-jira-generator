@@ -4,7 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import axios from "axios";
 import { JiraConnection } from "../types";
 
-const API = "http://localhost:8000";
+import { API } from "../lib/api";
 const STORAGE_KEY = "jira-live-connection-v1";
 
 export const emptyConnection = (): JiraConnection => ({

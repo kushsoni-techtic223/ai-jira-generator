@@ -8,7 +8,7 @@ import {
   loadEmailRecipients,
 } from "../lib/emailRecipients";
 
-const API = "http://127.0.0.1:8000";
+import { API } from "../lib/api";
 const LOCAL_KEY = "github-daily-local-timer-v1";
 
 type ActiveTimer = {

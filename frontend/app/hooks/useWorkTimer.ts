@@ -4,7 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import axios from "axios";
 import { jiraAuthHeaders } from "../lib/jiraSession";
 
-const API = "http://localhost:8000";
+import { API } from "../lib/api";
 const TIMER_KEY = "jira-active-timer-v1";
 
 export type ActiveTimer = {

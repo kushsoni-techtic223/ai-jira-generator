@@ -9,7 +9,7 @@ import {
   loadEmailRecipients,
 } from "../lib/emailRecipients";
 
-const API = "http://127.0.0.1:8000";
+import { API } from "../lib/api";
 const STORAGE_KEY = "github-daily-connection-v3";
 
 type GithubProject = {
@@ -516,8 +516,7 @@ export default function GitHubDailyBoard() {
                   </a>
                   , set callback to{" "}
                   <code className="rounded bg-white px-1">
-                    {oauthRedirect ||
-                      "http://localhost:8000/auth/github/callback"}
+                    {oauthRedirect || `${API}/auth/github/callback`}
                   </code>
                   , then add <code className="rounded bg-white px-1">GITHUB_CLIENT_ID</code>{" "}
                   and{" "}
