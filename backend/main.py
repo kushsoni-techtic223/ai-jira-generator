@@ -1471,27 +1471,35 @@ def github_daily_local_timer_stop(
 
         created = None
         pushed = None
+        commit_note = None
         msg = (body.commit_message or "").strip()
         if msg:
-            created = local_git.create_commit(
-                active["repo_path"],
-                message=msg,
-                add_all=body.add_all,
-                branch=active.get("branch"),
-            )
-            if body.push:
-                creds = _github_creds_from_request(body, x_github_session)
-                try:
-                    pushed = local_git.push_to_remote(
-                        active["repo_path"],
-                        branch=active.get("branch"),
-                        token=creds.get("token"),
-                    )
-                except local_git.LocalGitError as push_exc:
-                    raise local_git.LocalGitError(
-                        f"Committed locally ({created.get('short_sha')}), "
-                        f"but GitHub push failed: {push_exc}"
-                    ) from push_exc
+            try:
+                created = local_git.create_commit(
+                    active["repo_path"],
+                    message=msg,
+                    add_all=body.add_all,
+                    branch=active.get("branch"),
+                )
+                if body.push:
+                    creds = _github_creds_from_request(body, x_github_session)
+                    try:
+                        pushed = local_git.push_to_remote(
+                            active["repo_path"],
+                            branch=active.get("branch"),
+                            token=creds.get("token"),
+                        )
+                    except local_git.LocalGitError as push_exc:
+                        raise local_git.LocalGitError(
+                            f"Committed locally ({created.get('short_sha')}), "
+                            f"but GitHub push failed: {push_exc}"
+                        ) from push_exc
+            except local_git.LocalGitError as commit_exc:
+                # If nothing changed, still allow timer stop/save.
+                if "Nothing to commit" in str(commit_exc):
+                    commit_note = "No file changes to commit. Timer saved without a new commit."
+                else:
+                    raise
 
         ended = local_git.utc_now_iso()
         started = active.get("started_at") or ended
@@ -1527,6 +1535,7 @@ def github_daily_local_timer_stop(
             "active": None,
             "created_commit": created,
             "pushed": pushed,
+            "commit_note": commit_note,
         }
     except Exception as exc:
         _handle_github_errors(exc)

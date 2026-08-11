@@ -4,6 +4,15 @@ backend/data/
 backend/uploads/
 frontend/node_modules/
 frontend/.next/
+frontend/dist/
+frontend/out/
+frontend/release/
+frontend/*.log
+frontend/npm-debug.log*
+frontend/yarn-debug.log*
+frontend/yarn-error.log*
+frontend/.electron/
+frontend/.electron-builder/
 **/__pycache__/
 *.pyc
 .venv/

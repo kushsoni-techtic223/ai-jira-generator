@@ -2,11 +2,15 @@
   "name": "ai-jira-generator-frontend",
   "version": "0.1.0",
   "private": true,
+  "main": "electron/main.cjs",
   "scripts": {
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "next lint"
+    "lint": "next lint",
+    "desktop:dev": "electron ./electron/main.cjs",
+    "desktop:start": "electron ./electron/main.cjs --prod",
+    "desktop:dist": "yarn build && electron-packager . \"Daily Time Logger\" --platform=darwin --arch=arm64 --out=dist --overwrite --prune=false --asar=false --extra-resource=\"../backend\" --ignore=\"^/dist$\" --ignore=\"^/\\.next/cache$\""
   },
   "dependencies": {
     "axios": "^1.12.2",
@@ -15,10 +19,13 @@
     "react-dom": "^19.1.1"
   },
   "devDependencies": {
+    "@electron/packager": "^20.2.1",
     "@types/node": "^24.3.0",
     "@types/react": "^19.1.11",
     "@types/react-dom": "^19.1.7",
     "autoprefixer": "^10.4.21",
+    "electron": "^43.3.0",
+    "electron-builder": "^26.15.3",
     "eslint": "^9.34.0",
     "eslint-config-next": "^15.5.0",
     "postcss": "^8.5.6",
