@@ -14,6 +14,7 @@ import { API } from "../lib/api";
 const isLocalBackend =
   API.includes("localhost") || API.includes("127.0.0.1");
 const STORAGE_KEY = "github-daily-connection-v3";
+const LOCAL_TIMER_STORAGE_KEY = "github-daily-local-timer-v1";
 
 type GithubProject = {
   full_name: string;
@@ -99,6 +100,17 @@ function ghHeaders(sessionId: string | null) {
   const h: Record<string, string> = {};
   if (sessionId) h["X-Github-Session"] = sessionId;
   return h;
+}
+
+function loadLocalTimerOwnerKey() {
+  try {
+    const raw = localStorage.getItem(LOCAL_TIMER_STORAGE_KEY);
+    if (!raw) return "";
+    const parsed = JSON.parse(raw) as { ownerKey?: string };
+    return (parsed.ownerKey || "").trim();
+  } catch {
+    return "";
+  }
 }
 
 export default function GitHubDailyBoard() {
@@ -393,6 +405,7 @@ export default function GitHubDailyBoard() {
           github_repos: selectedRepos.join(","),
           display_name: displayName || username,
           github_username: username,
+          owner_key: loadLocalTimerOwnerKey() || undefined,
           ...emailListPayload(emailTo, emailCc),
         },
         { headers: ghHeaders(sessionId) }
@@ -464,6 +477,7 @@ export default function GitHubDailyBoard() {
           github_repos: selectedRepos.join(","),
           display_name: displayName || username,
           github_username: username,
+          owner_key: loadLocalTimerOwnerKey() || undefined,
           ...emailListPayload(emailTo, emailCc),
         },
         { headers: ghHeaders(sessionId) }

@@ -119,6 +119,10 @@ class GitHubDailyRequest(BaseModel):
     display_name: Optional[str] = Field(
         None, description="Name shown in Regards / subject"
     )
+    owner_key: Optional[str] = Field(
+        None,
+        description="Owner key from local timer storage to scope saved local sessions",
+    )
 
 
 class GitHubConnectRequest(BaseModel):
@@ -1792,7 +1796,9 @@ def github_daily_email_preview(
         _reload_dotenv()
         tz_name = os.getenv("DAILY_EMAIL_TZ") or "Asia/Kolkata"
         day = body.date or datetime.now(ZoneInfo(tz_name)).date().isoformat()
-        local_sessions = gh_local.list_sessions(day=day, tz_name=tz_name)
+        local_sessions = gh_local.list_sessions(
+            owner_key=body.owner_key, day=day, tz_name=tz_name
+        )
         payload = github_daily.build_github_daily_email_payload(
             req_date=body.date,
             req_to=body.to,
@@ -1831,7 +1837,9 @@ def github_daily_email_open_mail_app(
         _reload_dotenv()
         tz_name = os.getenv("DAILY_EMAIL_TZ") or "Asia/Kolkata"
         day = body.date or datetime.now(ZoneInfo(tz_name)).date().isoformat()
-        local_sessions = gh_local.list_sessions(day=day, tz_name=tz_name)
+        local_sessions = gh_local.list_sessions(
+            owner_key=body.owner_key, day=day, tz_name=tz_name
+        )
         payload = github_daily.build_github_daily_email_payload(
             req_date=body.date,
             req_to=body.to,

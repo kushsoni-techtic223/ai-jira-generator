@@ -115,13 +115,23 @@ def save_session(session_id: str, session: dict[str, Any]) -> None:
         _write(SESSIONS_PATH, sessions)
 
 
+def _is_valid_session(data: dict[str, Any]) -> bool:
+    auth_type = (data.get("auth_type") or "oauth").lower()
+    if auth_type == "basic":
+        has_site = bool((data.get("site_url") or data.get("base_url") or "").strip())
+        has_email = bool((data.get("email") or "").strip())
+        has_token = bool((data.get("api_token") or "").strip())
+        return has_site and has_email and has_token
+    return bool(data.get("access_token"))
+
+
 def get_session(session_id: str | None) -> dict[str, Any] | None:
     if not session_id:
         return None
     with _lock:
         sessions = _load_sessions()
         data = sessions.get(session_id)
-        if not data or not data.get("access_token"):
+        if not data or not _is_valid_session(data):
             return None
         return data
 
@@ -174,11 +184,7 @@ def list_worklogs(
     if issue_key:
         logs = [x for x in logs if x.get("issue_key") == issue_key]
     if account_id:
-        logs = [
-            x
-            for x in logs
-            if x.get("account_id") == account_id or not x.get("account_id")
-        ]
+        logs = [x for x in logs if x.get("account_id") == account_id]
     logs = sorted(logs, key=lambda x: x.get("logged_at") or "", reverse=True)
     return logs[:limit]
 
@@ -189,7 +195,7 @@ def worklog_totals_by_issue(account_id: str | None = None) -> dict[str, int]:
         logs = _read(WORKLOG_PATH, [])
     totals: dict[str, int] = {}
     for entry in logs:
-        if account_id and entry.get("account_id") and entry.get("account_id") != account_id:
+        if account_id and entry.get("account_id") != account_id:
             continue
         key = entry.get("issue_key")
         if not key:
