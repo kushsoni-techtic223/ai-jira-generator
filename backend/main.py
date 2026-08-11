@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 from email.message import EmailMessage
 from email.policy import SMTP
 from typing import Any, Optional
-from urllib.parse import quote, urlparse
+from urllib.parse import quote
 from zoneinfo import ZoneInfo
 
 import http_client  # noqa: F401 — disable Cursor proxy before outbound HTTP
@@ -1291,27 +1291,13 @@ def github_oauth_setup():
 
 @app.get("/auth/github/login")
 def github_oauth_login(request: Request):
-    """
-    Redirect browser to GitHub authorize screen (no PAT needed).
-    Pass ?switch=1 to log out of the current GitHub user first so another
-    account can be chosen (GitHub otherwise reuses the browser session).
-    """
+    """Redirect browser to GitHub authorize screen (no PAT needed)."""
     try:
-        sid = request.query_params.get("sid") or None
+        switch = request.query_params.get("switch") in ("1", "true", "yes")
+        sid = None if switch else (request.query_params.get("sid") or None)
         url, _sid = github_oauth.build_authorize_url(sid)
-        switch = (request.query_params.get("switch") or "").lower() in (
-            "1",
-            "true",
-            "yes",
-        )
         if switch:
-            # Relative return_to path — GitHub then opens authorize after logout.
-            parsed = urlparse(url)
-            return_to = parsed.path + (f"?{parsed.query}" if parsed.query else "")
-            logout_url = (
-                f"https://github.com/logout?return_to={quote(return_to, safe='')}"
-            )
-            return RedirectResponse(logout_url, status_code=302)
+            url = github_oauth.build_switch_account_url(url)
         return RedirectResponse(url, status_code=302)
     except Exception as exc:
         _handle_github_errors(exc)

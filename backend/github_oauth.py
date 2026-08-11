@@ -8,7 +8,7 @@ import os
 import secrets
 import time
 from typing import Any
-from urllib.parse import urlencode
+from urllib.parse import quote, urlencode
 
 from http_client import external_request
 import github_session_store as gh_sessions
@@ -131,6 +131,11 @@ def build_authorize_url(session_id: str | None = None) -> tuple[str, str]:
         "allow_signup": "true",
     }
     return f"{AUTHORIZE_URL}?{urlencode(params)}", sid
+
+
+def build_switch_account_url(authorize_url: str) -> str:
+    """Sign out of GitHub in the browser, then return to OAuth (pick another account)."""
+    return f"https://github.com/logout?return_to={quote(authorize_url, safe='')}"
 
 
 def exchange_code(code: str) -> dict[str, Any]:

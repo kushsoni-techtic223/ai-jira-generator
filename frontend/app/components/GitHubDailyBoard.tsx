@@ -278,18 +278,7 @@ export default function GitHubDailyBoard() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const disconnect = async () => {
-    try {
-      if (sessionId) {
-        await axios.post(
-          `${API}/auth/github/logout`,
-          {},
-          { headers: ghHeaders(sessionId) }
-        );
-      }
-    } catch {
-      /* ignore */
-    }
+  const clearConnection = () => {
     clearStored();
     setConnected(false);
     setSessionId(null);
@@ -302,9 +291,34 @@ export default function GitHubDailyBoard() {
     setError(null);
   };
 
-  /** Clear our session, log out of GitHub in this browser, then pick another account. */
-  const switchAccount = async () => {
-    await disconnect();
+  const signOut = async () => {
+    try {
+      if (sessionId) {
+        await axios.post(
+          `${API}/auth/github/logout`,
+          {},
+          { headers: ghHeaders(sessionId) }
+        );
+      }
+    } catch {
+      /* ignore */
+    }
+    clearConnection();
+  };
+
+  const switchGitHubAccount = async () => {
+    try {
+      if (sessionId) {
+        await axios.post(
+          `${API}/auth/github/logout`,
+          {},
+          { headers: ghHeaders(sessionId) }
+        );
+      }
+    } catch {
+      /* ignore */
+    }
+    clearConnection();
     window.location.href = `${API}/auth/github/login?switch=1`;
   };
 
@@ -534,17 +548,19 @@ export default function GitHubDailyBoard() {
         {!connected ? (
           <div className="space-y-4">
             {oauthConfigured ? (
-              <div className="space-y-2">
+              <div className="flex flex-wrap items-center gap-3">
                 <a
-                  href={`${API}/auth/github/login?switch=1`}
+                  href={`${API}/auth/github/login`}
                   className="inline-flex rounded-md bg-slate-900 px-4 py-2.5 text-sm font-semibold text-white hover:bg-slate-800"
                 >
                   Connect with GitHub
                 </a>
-                <p className="text-xs text-slate-500">
-                  Opens GitHub login so you can choose which account to use (not
-                  stuck on a previous browser login).
-                </p>
+                <a
+                  href={`${API}/auth/github/login?switch=1`}
+                  className="inline-flex rounded-md border border-slate-300 px-4 py-2.5 text-sm font-semibold text-slate-800 hover:bg-slate-50"
+                >
+                  Use a different GitHub account
+                </a>
               </div>
             ) : (
               <div className="rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-950">
@@ -628,24 +644,19 @@ export default function GitHubDailyBoard() {
               </button>
               <button
                 type="button"
-                onClick={disconnect}
-                className="rounded-md border border-slate-300 px-3 py-2 text-sm text-slate-700 hover:bg-slate-50"
-              >
-                Disconnect
-              </button>
-              <button
-                type="button"
-                onClick={switchAccount}
-                className="rounded-md border border-violet-300 bg-violet-50 px-3 py-2 text-sm font-semibold text-violet-900 hover:bg-violet-100"
+                onClick={switchGitHubAccount}
+                className="rounded-md border border-slate-300 px-3 py-2 text-sm font-semibold text-slate-800 hover:bg-slate-50"
               >
                 Switch GitHub account
               </button>
+              <button
+                type="button"
+                onClick={signOut}
+                className="rounded-md border border-rose-200 bg-rose-50 px-3 py-2 text-sm font-semibold text-rose-800 hover:bg-rose-100"
+              >
+                Sign out
+              </button>
             </div>
-            <p className="text-xs text-slate-500">
-              Wrong user shown? Use <strong>Switch GitHub account</strong> — it
-              signs out of GitHub in this browser, then lets you pick another
-              login.
-            </p>
 
             <div>
               <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
