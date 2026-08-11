@@ -36,10 +36,10 @@ function pickPython(backendDir) {
   return candidates.find((p) => (p.includes(path.sep) ? fs.existsSync(p) : true));
 }
 
-function spawnLogged(cmd, args, cwd, name) {
+function spawnLogged(cmd, args, cwd, name, extraEnv = {}) {
   const child = spawn(cmd, args, {
     cwd,
-    env: { ...process.env },
+    env: { ...process.env, ...extraEnv },
     stdio: ["ignore", "pipe", "pipe"],
   });
 
@@ -49,6 +49,20 @@ function spawnLogged(cmd, args, cwd, name) {
     process.stdout.write(`[${name}] exited with code ${code}\n`);
   });
   return child;
+}
+
+function pickNodeRuntime() {
+  // Packaged app may not have system "node" on PATH.
+  // Reuse Electron binary as Node when ELECTRON_RUN_AS_NODE is set.
+  const candidates = ["node", "nodejs"];
+  if (!app.isPackaged) {
+    return { cmd: "node", env: {} };
+  }
+  return {
+    cmd: process.execPath,
+    env: { ELECTRON_RUN_AS_NODE: "1" },
+    fallbackCmds: candidates,
+  };
 }
 
 function canConnect(url) {
@@ -92,6 +106,7 @@ async function startServices() {
   const { frontendDir, backendDir } = rootPaths();
   const python = pickPython(backendDir);
   if (!python) throw new Error("Python not found for backend startup.");
+  const writableDataDir = path.join(app.getPath("userData"), "backend-data");
 
   const backendUrl = `http://127.0.0.1:${BACKEND_PORT}/auth/github/setup`;
   const backendUp = await canConnect(backendUrl);
@@ -108,7 +123,8 @@ async function startServices() {
         String(BACKEND_PORT),
       ],
       backendDir,
-      "backend"
+      "backend",
+      { BACKEND_DATA_DIR: writableDataDir }
     );
   }
   await waitForHttp(`http://127.0.0.1:${BACKEND_PORT}/auth/github/setup`);
@@ -124,6 +140,9 @@ async function startServices() {
       "bin",
       "next"
     );
+    if (!fs.existsSync(nextBin)) {
+      throw new Error(`Next runtime not found: ${nextBin}`);
+    }
     if (isDev && !app.isPackaged) {
       frontendProc = spawnLogged(
         "yarn",
@@ -132,12 +151,35 @@ async function startServices() {
         "frontend"
       );
     } else {
-      frontendProc = spawnLogged(
-        "node",
-        [nextBin, "start", "-p", String(FRONTEND_PORT)],
-        frontendDir,
-        "frontend"
-      );
+      const nodeRt = pickNodeRuntime();
+      try {
+        frontendProc = spawnLogged(
+          nodeRt.cmd,
+          [nextBin, "start", "-p", String(FRONTEND_PORT)],
+          frontendDir,
+          "frontend",
+          nodeRt.env || {}
+        );
+      } catch (err) {
+        const fallbackCmds = nodeRt.fallbackCmds || [];
+        if (fallbackCmds.length === 0) throw err;
+        let spawned = null;
+        for (const cmd of fallbackCmds) {
+          try {
+            spawned = spawnLogged(
+              cmd,
+              [nextBin, "start", "-p", String(FRONTEND_PORT)],
+              frontendDir,
+              "frontend"
+            );
+            break;
+          } catch {
+            // try next fallback command
+          }
+        }
+        if (!spawned) throw err;
+        frontendProc = spawned;
+      }
     }
   }
   await waitForHttp(`http://127.0.0.1:${FRONTEND_PORT}`);

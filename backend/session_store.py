@@ -9,7 +9,12 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
+_DEFAULT_DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
+DATA_DIR = (
+    os.path.join(os.getenv("BACKEND_DATA_DIR"), "jira")
+    if os.getenv("BACKEND_DATA_DIR")
+    else _DEFAULT_DATA_DIR
+)
 SESSIONS_PATH = os.path.join(DATA_DIR, "oauth_sessions.json")
 # Legacy single-session file (migrated on first read)
 LEGACY_TOKEN_PATH = os.path.join(DATA_DIR, "oauth_session.json")

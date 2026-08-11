@@ -10,7 +10,9 @@
     "lint": "next lint",
     "desktop:dev": "electron ./electron/main.cjs",
     "desktop:start": "electron ./electron/main.cjs --prod",
-    "desktop:dist": "yarn build && electron-packager . \"Daily Time Logger\" --platform=darwin --arch=arm64 --out=dist --overwrite --prune=false --asar=false --extra-resource=\"../backend\" --ignore=\"^/dist$\" --ignore=\"^/\\.next/cache$\""
+    "desktop:dist": "rm -rf \"dist\" && yarn build && electron-packager . \"Daily Time Logger\" --platform=darwin --arch=arm64 --out=dist --overwrite --prune=false --asar=false --extra-resource=\"../backend\" --ignore=\"^/dist$\" --ignore=\"^/\\.next/cache$\"",
+    "desktop:dmg": "yarn desktop:dist && rm -f \"dist/Daily-Time-Logger-mac-arm64.dmg\" && hdiutil create -volname \"Daily Time Logger\" -srcfolder \"dist/Daily Time Logger-darwin-arm64/Daily Time Logger.app\" -ov -format UDZO \"dist/Daily-Time-Logger-mac-arm64.dmg\"",
+    "dist:mac": "npm run desktop:dmg"
   },
   "dependencies": {
     "axios": "^1.12.2",

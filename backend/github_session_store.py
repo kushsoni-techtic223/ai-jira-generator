@@ -9,7 +9,12 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
+_DEFAULT_DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
+DATA_DIR = (
+    os.path.join(os.getenv("BACKEND_DATA_DIR"), "github")
+    if os.getenv("BACKEND_DATA_DIR")
+    else _DEFAULT_DATA_DIR
+)
 SESSIONS_PATH = os.path.join(DATA_DIR, "github_sessions.json")
 STATE_PATH = os.path.join(DATA_DIR, "github_oauth_states.json")
 

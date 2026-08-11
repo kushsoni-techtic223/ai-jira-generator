@@ -10,7 +10,12 @@ from datetime import datetime, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
 
-DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
+_DEFAULT_DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
+DATA_DIR = (
+    os.path.join(os.getenv("BACKEND_DATA_DIR"), "github-local")
+    if os.getenv("BACKEND_DATA_DIR")
+    else _DEFAULT_DATA_DIR
+)
 PATH = os.path.join(DATA_DIR, "github_local_sessions.json")
 ACTIVE_PATH = os.path.join(DATA_DIR, "github_local_active_timer.json")
 
