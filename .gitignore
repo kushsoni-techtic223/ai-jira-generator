@@ -13,6 +13,8 @@ frontend/yarn-debug.log*
 frontend/yarn-error.log*
 frontend/.electron/
 frontend/.electron-builder/
+frontend/.desktop-backend/
+frontend/.desktop-runtime/
 **/__pycache__/
 *.pyc
 .venv/

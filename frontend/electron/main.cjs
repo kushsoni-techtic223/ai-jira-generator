@@ -1,5 +1,5 @@
-const { app, BrowserWindow, shell } = require("electron");
-const { spawn } = require("node:child_process");
+const { app, BrowserWindow, dialog, shell } = require("electron");
+const { spawn, spawnSync } = require("node:child_process");
 const path = require("node:path");
 const fs = require("node:fs");
 const http = require("node:http");
@@ -13,40 +13,204 @@ let backendProc = null;
 let frontendProc = null;
 let win = null;
 
-function rootPaths() {
-  const packagedFrontendExtra = path.join(process.resourcesPath, "frontend");
-  const packagedFrontendFallback = path.resolve(__dirname, "..");
-  const frontendDir = app.isPackaged
-    ? fs.existsSync(packagedFrontendExtra)
-      ? packagedFrontendExtra
-      : packagedFrontendFallback
-    : path.resolve(__dirname, "..");
-  const backendDir = app.isPackaged
-    ? path.join(process.resourcesPath, "backend")
-    : path.resolve(__dirname, "..", "..", "backend");
-  return { frontendDir, backendDir };
+function logPath() {
+  try {
+    return path.join(app.getPath("userData"), "desktop-startup.log");
+  } catch {
+    return path.join(process.cwd(), "desktop-startup.log");
+  }
 }
 
-function pickPython(backendDir) {
+function logLine(msg) {
+  const line = `[${new Date().toISOString()}] ${msg}\n`;
+  try {
+    fs.appendFileSync(logPath(), line);
+  } catch {
+    // ignore
+  }
+  process.stdout.write(line);
+}
+
+function rootPaths() {
+  const devFrontendDir = path.resolve(__dirname, "..");
+  const packagedRuntimeDir = path.join(process.resourcesPath, ".desktop-runtime");
+  const packagedFrontendDir = path.resolve(__dirname, "..");
+  const frontendDir = app.isPackaged
+    ? fs.existsSync(path.join(packagedRuntimeDir, "server.js"))
+      ? packagedRuntimeDir
+      : packagedFrontendDir
+    : devFrontendDir;
+  const backendDir = app.isPackaged
+    ? path.join(process.resourcesPath, ".desktop-backend")
+    : path.resolve(__dirname, "..", "..", "backend");
+  return {
+    frontendDir,
+    backendDir,
+    useStandalone: app.isPackaged && frontendDir === packagedRuntimeDir,
+  };
+}
+
+function commandExists(cmd) {
+  const probe = spawnSync(cmd, ["--version"], {
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      PATH: [
+        "/opt/homebrew/bin",
+        "/usr/local/bin",
+        "/Library/Frameworks/Python.framework/Versions/Current/bin",
+        "/usr/bin",
+        "/bin",
+        process.env.PATH || "",
+      ].join(":"),
+    },
+  });
+  return !probe.error && probe.status === 0;
+}
+
+function resolvePythonCommand(cmd) {
+  if (cmd.includes(path.sep)) return cmd;
+  const dirs = [
+    "/opt/homebrew/bin",
+    "/usr/local/bin",
+    "/Library/Frameworks/Python.framework/Versions/Current/bin",
+    "/usr/bin",
+    "/bin",
+  ];
+  for (const dir of dirs) {
+    const full = path.join(dir, cmd);
+    if (fs.existsSync(full)) return full;
+  }
+  return cmd;
+}
+
+function pythonHasModule(pythonCmd, moduleName) {
+  const probe = spawnSync(pythonCmd, ["-c", `import ${moduleName}`], {
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      PATH: [
+        "/opt/homebrew/bin",
+        "/usr/local/bin",
+        "/Library/Frameworks/Python.framework/Versions/Current/bin",
+        "/usr/bin",
+        "/bin",
+        process.env.PATH || "",
+      ].join(":"),
+    },
+  });
+  return !probe.error && probe.status === 0;
+}
+
+function pythonReadyForBackend(pythonCmd) {
+  return (
+    pythonHasModule(pythonCmd, "uvicorn") &&
+    pythonHasModule(pythonCmd, "fastapi") &&
+    pythonHasModule(pythonCmd, "requests") &&
+    pythonHasModule(pythonCmd, "dotenv")
+  );
+}
+
+function ensureBackendPython(backendDir) {
+  const userVenvPython = path.join(
+    app.getPath("userData"),
+    "backend-venv",
+    "bin",
+    "python"
+  );
   const candidates = [
+    userVenvPython,
     path.join(backendDir, ".venv", "bin", "python"),
     "python3",
     "python",
   ];
-  return candidates.find((p) => (p.includes(path.sep) ? fs.existsSync(p) : true));
+
+  for (const candidate of candidates) {
+    const resolved = resolvePythonCommand(candidate);
+    const exists = resolved.includes(path.sep)
+      ? fs.existsSync(resolved)
+      : commandExists(resolved);
+    if (!exists) continue;
+    if (pythonReadyForBackend(resolved)) {
+      return resolved;
+    }
+  }
+
+  const basePython = ["python3", "python"]
+    .map(resolvePythonCommand)
+    .find((cmd) => commandExists(cmd) || (cmd.includes(path.sep) && fs.existsSync(cmd)));
+  if (!basePython) {
+    throw new Error("Python 3 was not found. Install Python 3 and reopen the app.");
+  }
+
+  const venvDir = path.join(app.getPath("userData"), "backend-venv");
+  const requirements = path.join(backendDir, "requirements.txt");
+  if (!fs.existsSync(requirements)) {
+    throw new Error(`Missing backend requirements at ${requirements}`);
+  }
+
+  logLine(`Creating backend venv at ${venvDir}`);
+  fs.rmSync(venvDir, { recursive: true, force: true });
+  const venvResult = spawnSync(basePython, ["-m", "venv", venvDir], {
+    encoding: "utf8",
+  });
+  if (venvResult.status !== 0) {
+    throw new Error(
+      `Failed to create Python venv:\n${venvResult.stderr || venvResult.stdout || "unknown error"}`
+    );
+  }
+
+  const pipPython = path.join(venvDir, "bin", "python");
+  logLine("Installing backend Python packages");
+  const pipResult = spawnSync(
+    pipPython,
+    ["-m", "pip", "install", "--upgrade", "pip", "-r", requirements],
+    { encoding: "utf8" }
+  );
+  if (pipResult.status !== 0) {
+    throw new Error(
+      `Failed to install backend packages:\n${pipResult.stderr || pipResult.stdout || "unknown error"}`
+    );
+  }
+
+  if (!pythonReadyForBackend(pipPython)) {
+    throw new Error("Backend packages installed, but required modules are still missing.");
+  }
+  return pipPython;
 }
 
 function spawnLogged(cmd, args, cwd, name, extraEnv = {}) {
   const child = spawn(cmd, args, {
     cwd,
-    env: { ...process.env, ...extraEnv },
+    env: {
+      ...process.env,
+      PATH: [
+        "/opt/homebrew/bin",
+        "/usr/local/bin",
+        "/Library/Frameworks/Python.framework/Versions/Current/bin",
+        "/usr/bin",
+        "/bin",
+        process.env.PATH || "",
+      ].join(":"),
+      ...extraEnv,
+    },
     stdio: ["ignore", "pipe", "pipe"],
   });
 
-  child.stdout.on("data", (buf) => process.stdout.write(`[${name}] ${buf}`));
-  child.stderr.on("data", (buf) => process.stderr.write(`[${name}] ${buf}`));
+  child.stdout.on("data", (buf) => {
+    const text = buf.toString();
+    process.stdout.write(`[${name}] ${text}`);
+    logLine(`[${name}] ${text.trim()}`);
+  });
+  child.stderr.on("data", (buf) => {
+    const text = buf.toString();
+    process.stderr.write(`[${name}] ${text}`);
+    logLine(`[${name}] ${text.trim()}`);
+  });
   child.on("exit", (code) => {
-    process.stdout.write(`[${name}] exited with code ${code}\n`);
+    const msg = `[${name}] exited with code ${code}`;
+    process.stdout.write(`${msg}\n`);
+    logLine(msg);
   });
   return child;
 }
@@ -103,10 +267,17 @@ function waitForHttp(url, timeoutMs = 60000) {
 }
 
 async function startServices() {
-  const { frontendDir, backendDir } = rootPaths();
-  const python = pickPython(backendDir);
-  if (!python) throw new Error("Python not found for backend startup.");
+  const { frontendDir, backendDir, useStandalone } = rootPaths();
+  logLine(`frontendDir=${frontendDir}`);
+  logLine(`backendDir=${backendDir}`);
+  logLine(`useStandalone=${useStandalone}`);
+  if (!backendDir || !fs.existsSync(backendDir)) {
+    throw new Error(`Backend folder not found: ${backendDir || "(undefined)"}`);
+  }
+  const python = ensureBackendPython(backendDir);
+  logLine(`Using python=${python}`);
   const writableDataDir = path.join(app.getPath("userData"), "backend-data");
+  fs.mkdirSync(writableDataDir, { recursive: true });
 
   const backendUrl = `http://127.0.0.1:${BACKEND_PORT}/auth/github/setup`;
   const backendUp = await canConnect(backendUrl);
@@ -132,17 +303,6 @@ async function startServices() {
   const frontendUrl = `http://127.0.0.1:${FRONTEND_PORT}`;
   const frontendUp = await canConnect(frontendUrl);
   if (!frontendUp) {
-    const nextBin = path.join(
-      frontendDir,
-      "node_modules",
-      "next",
-      "dist",
-      "bin",
-      "next"
-    );
-    if (!fs.existsSync(nextBin)) {
-      throw new Error(`Next runtime not found: ${nextBin}`);
-    }
     if (isDev && !app.isPackaged) {
       frontendProc = spawnLogged(
         "yarn",
@@ -150,7 +310,35 @@ async function startServices() {
         frontendDir,
         "frontend"
       );
+    } else if (useStandalone) {
+      const serverJs = path.join(frontendDir, "server.js");
+      if (!fs.existsSync(serverJs)) {
+        throw new Error(`Standalone server not found: ${serverJs}`);
+      }
+      const nodeRt = pickNodeRuntime();
+      frontendProc = spawnLogged(
+        nodeRt.cmd,
+        [serverJs],
+        frontendDir,
+        "frontend",
+        {
+          ...(nodeRt.env || {}),
+          PORT: String(FRONTEND_PORT),
+          HOSTNAME: "127.0.0.1",
+        }
+      );
     } else {
+      const nextBin = path.join(
+        frontendDir,
+        "node_modules",
+        "next",
+        "dist",
+        "bin",
+        "next"
+      );
+      if (!fs.existsSync(nextBin)) {
+        throw new Error(`Next runtime not found: ${nextBin}`);
+      }
       const nodeRt = pickNodeRuntime();
       try {
         frontendProc = spawnLogged(
@@ -227,10 +415,23 @@ app.on("before-quit", () => {
 
 app.whenReady().then(async () => {
   try {
+    fs.writeFileSync(logPath(), "");
+    logLine("App starting");
     await startServices();
     createWindow();
+    logLine("Window created");
   } catch (err) {
+    const message = err && err.stack ? err.stack : String(err);
+    logLine(`Startup failed: ${message}`);
     console.error(err);
+    try {
+      dialog.showErrorBox(
+        "Daily Time Logger failed to start",
+        `${err.message || err}\n\nDetails: ${logPath()}`
+      );
+    } catch {
+      // ignore
+    }
     stopServices();
     app.quit();
   }

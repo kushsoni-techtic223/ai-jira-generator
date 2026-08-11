@@ -453,14 +453,26 @@ export default function LiveJiraBoard() {
       await axios.post(
         `${API}/reports/daily-email/open-mail-app`,
         {},
-        { headers: jiraAuthHeaders() }
+        { headers: jiraAuthHeaders(), timeout: 30000 }
       );
     } catch (err: any) {
-      setError(
-        err?.response?.data?.detail ||
-          err?.message ||
-          "Could not open Apple Mail draft"
-      );
+      // Fall back to mailto so Mac Mail still opens even if the local draft write fails.
+      try {
+        const copied = await copyEmailTemplate();
+        openMailtoDraft();
+        alert(
+          copied
+            ? "Opened Mac Mail via fallback. Press Cmd+V in the body to paste the sheet."
+            : "Opened Mac Mail via fallback. Copy the template if the body is empty."
+        );
+        setError(null);
+      } catch {
+        setError(
+          err?.response?.data?.detail ||
+            err?.message ||
+            "Could not open Apple Mail draft"
+        );
+      }
     }
   };
 

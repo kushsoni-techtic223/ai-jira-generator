@@ -233,7 +233,23 @@ def _handle_jira_errors(exc: Exception) -> None:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
     if isinstance(exc, jira_oauth.OAuthError):
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
-    raise exc
+    if isinstance(exc, OSError):
+        raise HTTPException(
+            status_code=500,
+            detail=f"Could not write mail draft files: {exc}",
+        ) from exc
+    raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+def _mail_drafts_dir() -> str:
+    """Writable folder for temp Mail drafts (DMG/.app bundles are often read-only)."""
+    base = os.getenv("BACKEND_DATA_DIR")
+    if base:
+        drafts_dir = os.path.join(base, "mail_drafts")
+    else:
+        drafts_dir = os.path.join(os.path.dirname(__file__), "data", "mail_drafts")
+    os.makedirs(drafts_dir, exist_ok=True)
+    return drafts_dir
 
 
 @app.post("/generate-jira")
@@ -970,8 +986,7 @@ def _open_draft_in_mac_mail(payload: dict[str, Any]) -> None:
     body = str(payload.get("text_body") or "")
     html = str(payload.get("html") or "")
 
-    drafts_dir = os.path.join(os.path.dirname(__file__), "data", "mail_drafts")
-    os.makedirs(drafts_dir, exist_ok=True)
+    drafts_dir = _mail_drafts_dir()
     body_path = os.path.join(drafts_dir, "latest-body.txt")
     with open(body_path, "w", encoding="utf-8") as f:
         f.write(body)
@@ -1079,8 +1094,7 @@ def _open_html_eml_in_mac_mail(payload: dict[str, Any], session: dict[str, Any])
     if html_body.strip():
         msg.add_alternative(html_body, subtype="html")
 
-    drafts_dir = os.path.join(os.path.dirname(__file__), "data", "mail_drafts")
-    os.makedirs(drafts_dir, exist_ok=True)
+    drafts_dir = _mail_drafts_dir()
     with tempfile.NamedTemporaryFile(
         mode="wb", suffix=".eml", prefix="daily-task-", dir=drafts_dir, delete=False
     ) as f:
