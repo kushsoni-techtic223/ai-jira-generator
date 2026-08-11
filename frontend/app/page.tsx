@@ -134,9 +134,28 @@ export default function Home() {
 
       <div className="mx-auto max-w-7xl px-4 pb-20 pt-8 sm:px-8 sm:pt-12">
         <header className="mb-10 max-w-3xl">
-          <p className="dtl-rise font-display text-xs font-semibold uppercase tracking-[0.28em] text-[var(--dtl-copper)]">
-            Daily Time Logger
-          </p>
+          <div className="dtl-rise flex items-center gap-3">
+            <span className="inline-flex h-9 w-9 items-center justify-center rounded-xl bg-[var(--dtl-ink)] text-white shadow-sm">
+              <svg
+                viewBox="0 0 24 24"
+                fill="none"
+                className="h-5 w-5"
+                aria-hidden
+              >
+                <circle cx="12" cy="12" r="8" stroke="currentColor" strokeWidth="1.8" />
+                <path
+                  d="M12 8v4l3 2"
+                  stroke="currentColor"
+                  strokeWidth="1.8"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                />
+              </svg>
+            </span>
+            <p className="font-display text-xs font-semibold uppercase tracking-[0.28em] text-[var(--dtl-copper)]">
+              Daily Time Logger
+            </p>
+          </div>
           <h1 className="dtl-rise-delay font-display mt-3 text-5xl font-bold leading-[0.95] tracking-tight text-[var(--dtl-ink)] sm:text-6xl md:text-7xl">
             Daily Time
             <br />

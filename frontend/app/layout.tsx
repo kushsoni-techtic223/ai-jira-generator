@@ -19,6 +19,11 @@ export const metadata: Metadata = {
   title: "Daily Time Logger",
   description:
     "Log today’s work from Jira timers or GitHub commits — and generate backlog tickets from docs.",
+  icons: {
+    icon: "/icon.svg",
+    shortcut: "/icon.svg",
+    apple: "/icon.svg",
+  },
 };
 
 export default function RootLayout({
