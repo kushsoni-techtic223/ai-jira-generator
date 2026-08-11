@@ -302,6 +302,12 @@ export default function GitHubDailyBoard() {
     setError(null);
   };
 
+  /** Clear our session, log out of GitHub in this browser, then pick another account. */
+  const switchAccount = async () => {
+    await disconnect();
+    window.location.href = `${API}/auth/github/login?switch=1`;
+  };
+
   const connectWithPat = async () => {
     if (!pat.trim()) {
       setError("Paste a PAT, or use Connect with GitHub instead.");
@@ -528,12 +534,18 @@ export default function GitHubDailyBoard() {
         {!connected ? (
           <div className="space-y-4">
             {oauthConfigured ? (
-              <a
-                href={`${API}/auth/github/login`}
-                className="inline-flex rounded-md bg-slate-900 px-4 py-2.5 text-sm font-semibold text-white hover:bg-slate-800"
-              >
-                Connect with GitHub
-              </a>
+              <div className="space-y-2">
+                <a
+                  href={`${API}/auth/github/login?switch=1`}
+                  className="inline-flex rounded-md bg-slate-900 px-4 py-2.5 text-sm font-semibold text-white hover:bg-slate-800"
+                >
+                  Connect with GitHub
+                </a>
+                <p className="text-xs text-slate-500">
+                  Opens GitHub login so you can choose which account to use (not
+                  stuck on a previous browser login).
+                </p>
+              </div>
             ) : (
               <div className="rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-950">
                 <p className="font-semibold">GitHub OAuth not configured yet</p>
@@ -621,7 +633,19 @@ export default function GitHubDailyBoard() {
               >
                 Disconnect
               </button>
+              <button
+                type="button"
+                onClick={switchAccount}
+                className="rounded-md border border-violet-300 bg-violet-50 px-3 py-2 text-sm font-semibold text-violet-900 hover:bg-violet-100"
+              >
+                Switch GitHub account
+              </button>
             </div>
+            <p className="text-xs text-slate-500">
+              Wrong user shown? Use <strong>Switch GitHub account</strong> — it
+              signs out of GitHub in this browser, then lets you pick another
+              login.
+            </p>
 
             <div>
               <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
