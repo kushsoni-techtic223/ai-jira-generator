@@ -13,6 +13,11 @@ export type ActiveTimer = {
   startedAt: string; // ISO
 };
 
+export type PendingWorklog = ActiveTimer & {
+  endedAt: string;
+  seconds: number;
+};
+
 export type WorklogResult = {
   ok: boolean;
   local?: { id: string; seconds: number; pushed_to_jira?: boolean };
@@ -47,6 +52,7 @@ export function formatDuration(totalSeconds: number) {
 
 export function useWorkTimer() {
   const [active, setActive] = useState<ActiveTimer | null>(null);
+  const [pending, setPending] = useState<PendingWorklog | null>(null);
   const [elapsed, setElapsed] = useState(0);
   const [logging, setLogging] = useState(false);
   const [totals, setTotals] = useState<Record<string, number>>({});
@@ -61,8 +67,9 @@ export function useWorkTimer() {
   }, []);
 
   useEffect(() => {
-    if (!active) {
-      setElapsed(0);
+    if (!active || pending) {
+      if (pending) setElapsed(pending.seconds);
+      else if (!active) setElapsed(0);
       return;
     }
     const tick = () => {
@@ -72,9 +79,10 @@ export function useWorkTimer() {
     tick();
     const id = window.setInterval(tick, 1000);
     return () => window.clearInterval(id);
-  }, [active]);
+  }, [active, pending]);
 
   const start = useCallback((issueKey: string, title: string) => {
+    if (pending) return;
     const timer: ActiveTimer = {
       issueKey,
       title,
@@ -82,47 +90,72 @@ export function useWorkTimer() {
     };
     saveTimer(timer);
     setActive(timer);
+    setPending(null);
     setLastMessage(null);
+  }, [pending]);
+
+  /** Freeze the timer and ask for a worklog description before posting to Jira. */
+  const requestStop = useCallback(() => {
+    if (!active || pending || logging) return;
+    const endedAt = new Date().toISOString();
+    const seconds = Math.max(
+      1,
+      Math.floor((Date.now() - new Date(active.startedAt).getTime()) / 1000)
+    );
+    setPending({
+      issueKey: active.issueKey,
+      title: active.title,
+      startedAt: active.startedAt,
+      endedAt,
+      seconds
+    });
+    setElapsed(seconds);
+    setLastMessage(null);
+  }, [active, pending, logging]);
+
+  /** Resume the running timer without logging. */
+  const cancelPending = useCallback(() => {
+    setPending(null);
   }, []);
 
-  const stopAndLog = useCallback(
-    async (opts?: { pushToJira?: boolean; comment?: string }) => {
-      if (!active) return null;
-      const endedAt = new Date().toISOString();
-      const seconds = Math.max(
-        1,
-        Math.floor((Date.now() - new Date(active.startedAt).getTime()) / 1000)
-      );
+  /** Save local + Jira worklog with the user's description. */
+  const confirmLog = useCallback(
+    async (comment: string) => {
+      if (!pending) return null;
+      const description = comment.trim();
+      if (!description) {
+        setLastMessage("Enter a log description before saving.");
+        return null;
+      }
+
       setLogging(true);
       setLastMessage(null);
       try {
         const res = await axios.post<WorklogResult>(
           `${API}/jira/worklog`,
           {
-            issue_key: active.issueKey,
-            seconds,
-            started_at: active.startedAt,
-            ended_at: endedAt,
-            comment:
-              opts?.comment ||
-              `Timer session on ${active.issueKey}: ${active.title}`,
-            push_to_jira: opts?.pushToJira !== false
+            issue_key: pending.issueKey,
+            seconds: pending.seconds,
+            started_at: pending.startedAt,
+            ended_at: pending.endedAt,
+            comment: description,
+            push_to_jira: true
           },
           { headers: jiraAuthHeaders() }
         );
         if (res.data.totals) setTotals(res.data.totals);
         saveTimer(null);
         setActive(null);
-        const mins = Math.max(1, Math.round(seconds / 60));
+        setPending(null);
+        const mins = Math.max(1, Math.round(pending.seconds / 60));
         setLastMessage(
           res.data.local?.pushed_to_jira
-            ? `Logged ${mins}m to ${active.issueKey} (local + Jira)`
-            : `Logged ${mins}m to ${active.issueKey} (local only)`
+            ? `Logged ${mins}m to ${pending.issueKey} (local + Jira)`
+            : `Logged ${mins}m to ${pending.issueKey} (local only)`
         );
         return res.data;
       } catch (err: any) {
-        // Still keep local if Jira push failed after local save? API rolls together.
-        // Keep timer running on failure so user can retry.
+        // Keep pending open so the user can fix/retry with the same description.
         setLastMessage(
           err?.response?.data?.detail ||
             err?.message ||
@@ -133,24 +166,28 @@ export function useWorkTimer() {
         setLogging(false);
       }
     },
-    [active]
+    [pending]
   );
 
   const discard = useCallback(() => {
     saveTimer(null);
     setActive(null);
+    setPending(null);
     setLastMessage("Timer discarded");
   }, []);
 
   return {
     active,
+    pending,
     elapsed,
     logging,
     totals,
     setTotals,
     lastMessage,
     start,
-    stopAndLog,
+    requestStop,
+    cancelPending,
+    confirmLog,
     discard,
     formatDuration
   };

@@ -22,6 +22,7 @@ import {
   setJiraSessionId
 } from "../lib/jiraSession";
 import EmailRecipientFields from "./EmailRecipientFields";
+import WorklogDescriptionModal from "./WorklogDescriptionModal";
 import {
   emailListPayload,
   loadEmailRecipients,
@@ -967,23 +968,28 @@ export default function LiveJiraBoard() {
                 </p>
                 <button
                   type="button"
-                  disabled={timer.logging}
-                  onClick={() => timer.stopAndLog()}
+                  disabled={timer.logging || !!timer.pending}
+                  onClick={() => timer.requestStop()}
                   className="rounded-lg bg-teal-800 px-3 py-1.5 text-sm font-semibold text-white hover:bg-teal-900 disabled:opacity-60"
                 >
-                  {timer.logging ? "Logging…" : "Stop & log"}
+                  {timer.pending
+                    ? "Awaiting description…"
+                    : timer.logging
+                      ? "Logging…"
+                      : "Stop & log"}
                 </button>
                 <button
                   type="button"
                   onClick={timer.discard}
-                  className="rounded-lg px-3 py-1.5 text-sm text-teal-800 hover:bg-teal-100"
+                  disabled={timer.logging}
+                  className="rounded-lg px-3 py-1.5 text-sm text-teal-800 hover:bg-teal-100 disabled:opacity-60"
                 >
                   Discard
                 </button>
               </div>
             )}
 
-            {timer.lastMessage && (
+            {timer.lastMessage && !timer.pending && (
               <p className="text-sm text-teal-800">{timer.lastMessage}</p>
             )}
           </div>
@@ -1153,6 +1159,16 @@ export default function LiveJiraBoard() {
           </div>
         </div>
       )}
+
+      {timer.pending && (
+        <WorklogDescriptionModal
+          pending={timer.pending}
+          logging={timer.logging}
+          error={timer.lastMessage}
+          onCancel={timer.cancelPending}
+          onSave={timer.confirmLog}
+        />
+      )}
     </div>
   );
 }
@@ -1278,7 +1294,7 @@ function SyncedBoard({
         // Timer only — do not auto-change Jira status / column.
         timer.start(ticket.story.id, ticket.story.title);
       }}
-      onStopTimer={() => timer.stopAndLog()}
+      onStopTimer={() => timer.requestStop()}
       timerBusy={timer.logging || syncingId === ticket.story.id}
     />
   );
@@ -1330,7 +1346,7 @@ function SyncedBoard({
         <p className="text-sm text-slate-500">
           {view === "jira_status"
             ? "Columns match your Jira board workflow (QA In Progress, Dev Completed, Ready for QA, etc.). Drag tickets to change status — updates sync to Jira."
-            : "Start a timer on a ticket while you work. Stop & log writes time to our system and to the Jira issue worklog."}
+            : "Start a timer on a ticket while you work. Stop & log asks for a description, then writes that comment to the Jira issue worklog."}
         </p>
         <div className="flex flex-wrap rounded-lg border border-slate-200 bg-white p-1">
           <ViewBtn
