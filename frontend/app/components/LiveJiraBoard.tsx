@@ -27,6 +27,17 @@ import {
   emailListPayload,
   loadEmailRecipients,
 } from "../lib/emailRecipients";
+import {
+  ManualExtraRow,
+  SheetRow,
+  buildDailySheetHtml,
+  buildDailySheetText,
+  extrasPayload,
+  mergeSheetRows,
+  minutesToHhMm,
+  parseDurationToMinutes,
+  sumSheetMinutes,
+} from "../lib/dailySheet";
 
 import { API } from "../lib/api";
 
@@ -100,15 +111,7 @@ type DailyEmailPreview = {
   subject: string;
   to: string[];
   cc: string[];
-  rows: {
-    sr: number;
-    date: string;
-    in_time: string;
-    out_time: string;
-    total_time: string;
-    project: string;
-    task: string;
-  }[];
+  rows: SheetRow[];
   total_time: string;
   html: string;
   text_body: string;
@@ -135,6 +138,16 @@ export default function LiveJiraBoard() {
   const [connectingToken, setConnectingToken] = useState(false);
   const [selectingSite, setSelectingSite] = useState(false);
   const [emailPreview, setEmailPreview] = useState<DailyEmailPreview | null>(null);
+  const [baseSheetRows, setBaseSheetRows] = useState<SheetRow[]>([]);
+  const [manualRows, setManualRows] = useState<ManualExtraRow[]>([]);
+  const [manualDraft, setManualDraft] = useState({
+    task: "",
+    project: "",
+    in_time: "",
+    out_time: "",
+    total_time: "",
+  });
+  const [manualError, setManualError] = useState<string | null>(null);
   const [preparingEmail, setPreparingEmail] = useState(false);
   const [sendingEmail, setSendingEmail] = useState(false);
   const [emailDate, setEmailDate] = useState(todayISO());
@@ -143,6 +156,36 @@ export default function LiveJiraBoard() {
 
   const timer = useWorkTimer();
   const { setTotals } = timer;
+
+  const sheetRows = useMemo(
+    () => mergeSheetRows(baseSheetRows, manualRows, emailDate),
+    [baseSheetRows, manualRows, emailDate]
+  );
+
+  const sheetTotalTime = useMemo(
+    () => minutesToHhMm(sumSheetMinutes(sheetRows) || 0),
+    [sheetRows]
+  );
+
+  const livePreview = useMemo(() => {
+    if (!emailPreview) return null;
+    const name = emailPreview.user_name || userName || "Team Member";
+    return {
+      ...emailPreview,
+      rows: sheetRows,
+      total_time: sheetTotalTime,
+      html: buildDailySheetHtml({
+        rows: sheetRows,
+        totalTime: sheetTotalTime,
+        userName: name,
+      }),
+      text_body: buildDailySheetText({
+        rows: sheetRows,
+        totalTime: sheetTotalTime,
+        userName: name,
+      }),
+    };
+  }, [emailPreview, sheetRows, sheetTotalTime, userName]);
 
   useEffect(() => {
     const saved = loadEmailRecipients();
@@ -399,14 +442,18 @@ export default function LiveJiraBoard() {
     setPreparingEmail(true);
     setError(null);
     try {
+      const extras = extrasPayload(manualRows);
       const res = await axios.post<DailyEmailPreview>(
         `${API}/reports/daily-email/preview`,
         {
           date: emailDate,
           ...emailListPayload(emailTo, emailCc),
+          extra_rows: extras.length ? extras : undefined,
         },
         { headers: jiraAuthHeaders() }
       );
+      // Keep base rows without manual ones so we can re-merge locally.
+      setBaseSheetRows((res.data.rows || []).filter((r) => !r.manual));
       setEmailPreview(res.data);
       if (!emailTo.trim() && res.data.to?.length) {
         setEmailTo(res.data.to.join(", "));
@@ -425,20 +472,63 @@ export default function LiveJiraBoard() {
     }
   };
 
+  const addManualRow = () => {
+    setManualError(null);
+    const task = manualDraft.task.trim();
+    if (!task) {
+      setManualError("Enter what you worked on.");
+      return;
+    }
+    const mins = parseDurationToMinutes(manualDraft.total_time);
+    if (!mins) {
+      setManualError("Enter duration as H:MM (e.g. 1:30).");
+      return;
+    }
+    setManualRows((prev) => [
+      ...prev,
+      {
+        id: `manual-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+        task,
+        project: manualDraft.project.trim(),
+        in_time: manualDraft.in_time.trim(),
+        out_time: manualDraft.out_time.trim(),
+        total_time: minutesToHhMm(mins),
+      },
+    ]);
+    setManualDraft({
+      task: "",
+      project: "",
+      in_time: "",
+      out_time: "",
+      total_time: "",
+    });
+  };
+
+  const removeManualRow = (id: string) => {
+    setManualRows((prev) => prev.filter((r) => r.id !== id));
+  };
+
+  const closeEmailPreview = () => {
+    setEmailPreview(null);
+    setManualError(null);
+  };
+
   const sendDailyEmail = async () => {
     setSendingEmail(true);
     setError(null);
     try {
+      const extras = extrasPayload(manualRows);
       const res = await axios.post(
         `${API}/reports/daily-email/send`,
         {
           date: emailDate,
           ...emailListPayload(emailTo, emailCc),
+          extra_rows: extras.length ? extras : undefined,
         },
         { headers: jiraAuthHeaders() }
       );
       if (res.data?.sent) {
-        setEmailPreview(null);
+        closeEmailPreview();
       }
       alert("Email sent successfully.");
     } catch (err: any) {
@@ -451,18 +541,18 @@ export default function LiveJiraBoard() {
   };
 
   const openMailtoDraft = () => {
-    if (!emailPreview) return;
+    if (!livePreview) return;
     const toList = (
       emailTo.trim()
         ? emailTo.split(",")
-        : emailPreview.to || []
+        : livePreview.to || []
     )
       .map((x) => x.trim())
       .filter(Boolean);
     const ccList = (
       emailCc.trim()
         ? emailCc.split(",")
-        : emailPreview.cc || []
+        : livePreview.cc || []
     )
       .map((x) => x.trim())
       .filter(Boolean);
@@ -475,12 +565,12 @@ export default function LiveJiraBoard() {
     if (ccList.length) {
       query.push(`cc=${encodeURIComponent(ccList.join(","))}`);
     }
-    query.push(`subject=${encodeURIComponent(emailPreview.subject || "")}`);
+    query.push(`subject=${encodeURIComponent(livePreview.subject || "")}`);
 
     const body =
-      (emailPreview.text_body || "").length > 6000
-        ? `${(emailPreview.text_body || "").slice(0, 6000)}\n\n[truncated in mailto draft]`
-        : emailPreview.text_body || "";
+      (livePreview.text_body || "").length > 6000
+        ? `${(livePreview.text_body || "").slice(0, 6000)}\n\n[truncated in mailto draft]`
+        : livePreview.text_body || "";
     query.push(`body=${encodeURIComponent(body)}`);
 
     const mailto = `mailto:${toPath}${query.length ? `?${query.join("&")}` : ""}`;
@@ -495,9 +585,9 @@ export default function LiveJiraBoard() {
   };
 
   const copyEmailTemplate = async () => {
-    if (!emailPreview) return false;
-    const html = emailPreview.html || "";
-    const text = emailPreview.text_body || "";
+    if (!livePreview) return false;
+    const html = livePreview.html || "";
+    const text = livePreview.text_body || "";
     try {
       if (navigator.clipboard && "write" in navigator.clipboard && html) {
         const item = new ClipboardItem({
@@ -521,7 +611,7 @@ export default function LiveJiraBoard() {
     API.includes("localhost") || API.includes("127.0.0.1");
 
   const openMacMailDraft = async () => {
-    if (!emailPreview) return;
+    if (!livePreview) return;
     setError(null);
     try {
       const copied = await copyEmailTemplate();
@@ -537,11 +627,13 @@ export default function LiveJiraBoard() {
         return;
       }
 
+      const extras = extrasPayload(manualRows);
       await axios.post(
         `${API}/reports/daily-email/open-mail-app`,
         {
           date: emailDate,
           ...emailListPayload(emailTo, emailCc),
+          extra_rows: extras.length ? extras : undefined,
         },
         { headers: jiraAuthHeaders(), timeout: 30000 }
       );
@@ -567,7 +659,7 @@ export default function LiveJiraBoard() {
   };
 
   const openGmailDraft = async () => {
-    if (!emailPreview) return;
+    if (!livePreview) return;
     setError(null);
     try {
       const copied = await copyEmailTemplate();
@@ -576,17 +668,17 @@ export default function LiveJiraBoard() {
       params.set("view", "cm");
       params.set("fs", "1");
       params.set("tf", "1");
-      if (emailTo.trim() || emailPreview.to.length)
+      if (emailTo.trim() || livePreview.to.length)
         params.set(
           "to",
-          emailTo.trim() || emailPreview.to.join(",")
+          emailTo.trim() || livePreview.to.join(",")
         );
-      if (emailCc.trim() || emailPreview.cc.length)
+      if (emailCc.trim() || livePreview.cc.length)
         params.set(
           "cc",
-          emailCc.trim() || emailPreview.cc.join(",")
+          emailCc.trim() || livePreview.cc.join(",")
         );
-      params.set("su", emailPreview.subject);
+      params.set("su", livePreview.subject);
       window.open(
         `https://mail.google.com/mail/?${params.toString()}`,
         "_blank",
@@ -603,10 +695,10 @@ export default function LiveJiraBoard() {
   };
 
   const copyTemplateHtml = async () => {
-    if (!emailPreview) return;
+    if (!livePreview) return;
     try {
-      const html = emailPreview.html || "";
-      const text = emailPreview.text_body || "";
+      const html = livePreview.html || "";
+      const text = livePreview.text_body || "";
 
       // Rich copy: preserves table layout/styles when pasted in mail clients.
       if (navigator.clipboard && "write" in navigator.clipboard && html) {
@@ -1029,7 +1121,7 @@ export default function LiveJiraBoard() {
         </div>
       )}
 
-      {emailPreview && (
+      {livePreview && (
         <div className="fixed inset-0 z-50 flex items-center justify-center overflow-y-auto bg-slate-900/60 p-4">
           <div className="my-auto flex max-h-[min(92vh,920px)] w-full max-w-5xl flex-col overflow-hidden rounded-xl bg-white shadow-2xl">
             <div className="flex shrink-0 items-start justify-between gap-3 border-b border-slate-200 px-5 py-4">
@@ -1038,20 +1130,141 @@ export default function LiveJiraBoard() {
                   Daily Email Preview
                 </p>
                 <h3 className="text-lg font-bold text-slate-900">
-                  {emailPreview.subject}
+                  {livePreview.subject}
                 </h3>
                 <p className="mt-1 text-xs text-slate-600">
-                  Date: {emailPreview.date} | Total: {emailPreview.total_time}h
+                  Date: {livePreview.date} | Total: {livePreview.total_time}h
+                  {manualRows.length > 0
+                    ? ` · ${manualRows.length} manual task${manualRows.length === 1 ? "" : "s"}`
+                    : ""}
                 </p>
               </div>
               <button
                 type="button"
                 className="rounded-md border border-slate-300 px-3 py-1.5 text-sm text-slate-700 hover:bg-slate-50"
-                onClick={() => setEmailPreview(null)}
+                onClick={closeEmailPreview}
               >
                 Close
               </button>
             </div>
+
+            {/* Always visible — do not put inside the sheet scroll area */}
+            <div className="shrink-0 border-b border-amber-200 bg-amber-50 px-5 py-3">
+              <p className="text-sm font-semibold text-slate-900">
+                Add work not on Jira
+              </p>
+              <p className="mt-0.5 text-xs text-slate-600">
+                Extra tasks for this sheet only (not logged to Jira). Duration
+                example: <code className="rounded bg-amber-100 px-1">1:30</code>
+              </p>
+              <div className="mt-2 flex flex-wrap items-end gap-2">
+                <label className="min-w-[12rem] flex-1 text-xs font-medium text-slate-700">
+                  Task
+                  <input
+                    type="text"
+                    value={manualDraft.task}
+                    onChange={(e) =>
+                      setManualDraft((d) => ({ ...d, task: e.target.value }))
+                    }
+                    placeholder="Client call / research / docs"
+                    className="mt-1 block w-full rounded-md border border-slate-300 px-2.5 py-1.5 text-sm"
+                  />
+                </label>
+                <label className="w-28 text-xs font-medium text-slate-700">
+                  Duration
+                  <input
+                    type="text"
+                    value={manualDraft.total_time}
+                    onChange={(e) =>
+                      setManualDraft((d) => ({
+                        ...d,
+                        total_time: e.target.value,
+                      }))
+                    }
+                    placeholder="1:30"
+                    className="mt-1 block w-full rounded-md border border-slate-300 px-2.5 py-1.5 text-sm"
+                  />
+                </label>
+                <label className="w-28 text-xs font-medium text-slate-700">
+                  Project
+                  <input
+                    type="text"
+                    value={manualDraft.project}
+                    onChange={(e) =>
+                      setManualDraft((d) => ({
+                        ...d,
+                        project: e.target.value,
+                      }))
+                    }
+                    placeholder="Other"
+                    className="mt-1 block w-full rounded-md border border-slate-300 px-2.5 py-1.5 text-sm"
+                  />
+                </label>
+                <label className="w-28 text-xs font-medium text-slate-700">
+                  In
+                  <input
+                    type="text"
+                    value={manualDraft.in_time}
+                    onChange={(e) =>
+                      setManualDraft((d) => ({
+                        ...d,
+                        in_time: e.target.value,
+                      }))
+                    }
+                    placeholder="2:00 PM"
+                    className="mt-1 block w-full rounded-md border border-slate-300 px-2.5 py-1.5 text-sm"
+                  />
+                </label>
+                <label className="w-28 text-xs font-medium text-slate-700">
+                  Out
+                  <input
+                    type="text"
+                    value={manualDraft.out_time}
+                    onChange={(e) =>
+                      setManualDraft((d) => ({
+                        ...d,
+                        out_time: e.target.value,
+                      }))
+                    }
+                    placeholder="3:30 PM"
+                    className="mt-1 block w-full rounded-md border border-slate-300 px-2.5 py-1.5 text-sm"
+                  />
+                </label>
+                <button
+                  type="button"
+                  onClick={addManualRow}
+                  className="rounded-md bg-teal-800 px-3 py-1.5 text-sm font-semibold text-white hover:bg-teal-900"
+                >
+                  + Add row to sheet
+                </button>
+              </div>
+              {manualError && (
+                <p className="mt-2 text-sm text-red-700">{manualError}</p>
+              )}
+              {manualRows.length > 0 && (
+                <ul className="mt-2 max-h-24 space-y-1 overflow-y-auto">
+                  {manualRows.map((row) => (
+                    <li
+                      key={row.id}
+                      className="flex flex-wrap items-center gap-2 rounded-md border border-amber-200 bg-white px-2.5 py-1.5 text-sm text-slate-800"
+                    >
+                      <span className="font-medium">{row.task}</span>
+                      <span className="text-slate-500">
+                        · {row.project || "Other"} · {row.total_time}h
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => removeManualRow(row.id)}
+                        className="ml-auto text-xs font-semibold text-red-700 hover:underline"
+                      >
+                        Remove
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+
             <div className="min-h-0 flex-1 overflow-y-auto">
               <div className="border-b border-slate-200 px-5 py-4">
                 <EmailRecipientFields
@@ -1096,10 +1309,11 @@ export default function LiveJiraBoard() {
                   </button>
                 </div>
               </div>
+
               <div className="p-5">
                 <div
                   className="prose max-w-none"
-                  dangerouslySetInnerHTML={{ __html: emailPreview.html }}
+                  dangerouslySetInnerHTML={{ __html: livePreview.html }}
                 />
               </div>
             </div>
@@ -1110,7 +1324,7 @@ export default function LiveJiraBoard() {
               </span>
               <button
                 type="button"
-                onClick={() => setEmailPreview(null)}
+                onClick={closeEmailPreview}
                 className="rounded-md border border-slate-300 px-4 py-2 text-sm text-slate-700 hover:bg-slate-50"
               >
                 Cancel
@@ -1129,7 +1343,7 @@ export default function LiveJiraBoard() {
               >
                 Open Gmail draft
               </button>
-              {emailPreview.smtp_ready && (
+              {livePreview.smtp_ready && (
                 <button
                   type="button"
                   onClick={sendDailyEmail}
@@ -1149,7 +1363,7 @@ export default function LiveJiraBoard() {
               <button
                 type="button"
                 onClick={() => {
-                  navigator.clipboard.writeText(emailPreview.text_body);
+                  navigator.clipboard.writeText(livePreview.text_body);
                 }}
                 className="rounded-md border border-slate-300 bg-white px-4 py-2 text-sm text-slate-700 hover:bg-slate-50"
               >

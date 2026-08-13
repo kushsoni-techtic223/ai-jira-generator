@@ -95,12 +95,31 @@ class WorklogRequest(BaseModel):
     push_to_jira: bool = True
 
 
+class ManualSheetRow(BaseModel):
+    """Extra sheet row for work done outside Jira timers/tickets."""
+
+    task: str = Field(..., min_length=1)
+    project: Optional[str] = ""
+    in_time: Optional[str] = ""
+    out_time: Optional[str] = ""
+    total_minutes: Optional[int] = Field(
+        None, ge=1, description="Duration in minutes (preferred)"
+    )
+    total_time: Optional[str] = Field(
+        None, description="Duration as H:MM, e.g. 1:30"
+    )
+
+
 class DailyEmailRequest(BaseModel):
     date: Optional[str] = Field(
         None, description="YYYY-MM-DD in report timezone (default: today)"
     )
     to: Optional[list[str]] = None
     cc: Optional[list[str]] = None
+    extra_rows: Optional[list[ManualSheetRow]] = Field(
+        None,
+        description="Manual tasks to append (no Jira ticket required)",
+    )
 
 
 class GitHubDailyRequest(BaseModel):
@@ -836,6 +855,33 @@ def _format_hhmm(seconds: int) -> str:
     return f"{h}:{m:02d}"
 
 
+def _parse_sheet_duration_seconds(
+    *,
+    total_minutes: int | None = None,
+    total_time: str | None = None,
+) -> int:
+    """Parse manual sheet duration into seconds (min 1 minute)."""
+    if total_minutes is not None and int(total_minutes) > 0:
+        return max(60, int(total_minutes) * 60)
+    raw = (total_time or "").strip()
+    if not raw:
+        raise ValueError("Manual row needs total_minutes or total_time (H:MM).")
+    if ":" in raw:
+        parts = raw.split(":")
+        if len(parts) != 2:
+            raise ValueError(f"Invalid total_time '{raw}' (use H:MM).")
+        h = int(parts[0])
+        m = int(parts[1])
+        if h < 0 or m < 0 or m >= 60:
+            raise ValueError(f"Invalid total_time '{raw}' (use H:MM).")
+        return max(60, (h * 60 + m) * 60)
+    # Plain hours, e.g. "1.5" or "2"
+    hours = float(raw)
+    if hours <= 0:
+        raise ValueError(f"Invalid total_time '{raw}'.")
+    return max(60, int(round(hours * 3600)))
+
+
 def _parse_iso_local(value: str, tz: ZoneInfo) -> datetime:
     raw = (value or "").strip()
     if raw.endswith("Z"):
@@ -1136,6 +1182,44 @@ def _build_daily_email_payload(
                 "task": task_text,
                 "task_summary": summary,
                 "task_url": url,
+                "manual": False,
+            }
+        )
+
+    # Append manual tasks (work done without a Jira ticket / timer).
+    for extra in req.extra_rows or []:
+        task = (extra.task or "").strip()
+        if not task:
+            continue
+        try:
+            sec = _parse_sheet_duration_seconds(
+                total_minutes=extra.total_minutes,
+                total_time=extra.total_time,
+            )
+        except ValueError as exc:
+            raise jira.JiraConfigError(str(exc)) from exc
+        total_seconds += sec
+        date_str = target_day.strftime("%d/%m/%y")
+        date_display = date_str if date_str != prev_date else ""
+        prev_date = date_str
+        project = (extra.project or "").strip() or "Other"
+        in_time = (extra.in_time or "").strip() or "—"
+        out_time = (extra.out_time or "").strip() or "—"
+        total_time = _format_hhmm(sec)
+        idx = len(rows) + 1
+        rows.append(
+            {
+                "sr": idx,
+                "date": date_str,
+                "date_display": date_display,
+                "in_time": in_time,
+                "out_time": out_time,
+                "total_time": total_time,
+                "project": project,
+                "task": f"{task} - {total_time}h",
+                "task_summary": task,
+                "task_url": None,
+                "manual": True,
             }
         )
 
