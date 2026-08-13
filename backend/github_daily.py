@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Optional
 from zoneinfo import ZoneInfo
 
@@ -15,7 +15,14 @@ def _reload_dotenv() -> None:
         from dotenv import load_dotenv
 
         env_path = os.path.join(os.path.dirname(__file__), ".env")
+        # Keep desktop/process overrides.
+        preserved = {
+            key: os.environ[key]
+            for key in ("DESKTOP_MODE", "BACKEND_DATA_DIR", "FRONTEND_URL")
+            if key in os.environ
+        }
         load_dotenv(env_path, override=True)
+        os.environ.update(preserved)
     except ImportError:
         pass
 
@@ -31,6 +38,160 @@ def _format_hhmm(seconds: int) -> str:
     h = mins // 60
     m = mins % 60
     return f"{h}:{m:02d}"
+
+
+def _pack_github_commits_into_workday(
+    rows: list[dict[str, Any]],
+    *,
+    target_day,
+    tz: ZoneInfo,
+    day_start_hour: int = 9,
+    day_end_hour: int = 18,
+) -> list[dict[str, Any]]:
+    """
+    Fit direct GitHub commits into free gaps of the workday.
+
+    - local_timer rows keep real In/Out.
+    - github_commit rows first fill 9 AM → local start, then after local → 6 PM.
+    """
+    commits = [x for x in rows if x.get("source") == "github_commit"]
+    timed = [x for x in rows if x.get("source") != "github_commit"]
+    if not commits:
+        return rows
+
+    day_start = datetime(
+        target_day.year,
+        target_day.month,
+        target_day.day,
+        day_start_hour,
+        0,
+        0,
+        tzinfo=tz,
+    )
+    day_end = datetime(
+        target_day.year,
+        target_day.month,
+        target_day.day,
+        day_end_hour,
+        0,
+        0,
+        tzinfo=tz,
+    )
+
+    occupied: list[tuple[datetime, datetime]] = []
+    for row in sorted(timed, key=lambda x: x["start_dt"]):
+        start = max(row["start_dt"], day_start)
+        end = min(row["end_dt"], day_end)
+        if end > start:
+            occupied.append((start, end))
+
+    merged: list[tuple[datetime, datetime]] = []
+    for start, end in occupied:
+        if not merged or start > merged[-1][1]:
+            merged.append((start, end))
+        else:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+
+    gaps: list[list[datetime]] = []
+    cursor = day_start
+    for start, end in merged:
+        if start > cursor:
+            gaps.append([cursor, start])
+        cursor = max(cursor, end)
+    if cursor < day_end:
+        gaps.append([cursor, day_end])
+
+    packed: list[dict[str, Any]] = []
+    for row in sorted(commits, key=lambda x: x["start_dt"]):
+        remaining = max(60, int(row.get("seconds") or 60))
+        while remaining > 0:
+            gap_idx = next(
+                (
+                    i
+                    for i, (g_start, g_end) in enumerate(gaps)
+                    if (g_end - g_start).total_seconds() >= 60
+                ),
+                None,
+            )
+            if gap_idx is None:
+                fallback_start = day_end
+                if packed:
+                    fallback_start = max(fallback_start, packed[-1]["end_dt"])
+                for t in timed:
+                    fallback_start = max(fallback_start, t["end_dt"])
+                packed.append(
+                    {
+                        **row,
+                        "start_dt": fallback_start,
+                        "end_dt": fallback_start + timedelta(seconds=remaining),
+                        "seconds": remaining,
+                    }
+                )
+                remaining = 0
+                break
+
+            g_start, g_end = gaps[gap_idx]
+            gap_sec = int((g_end - g_start).total_seconds())
+            take = min(remaining, gap_sec)
+            take = max(60, (take // 60) * 60)
+            if take > gap_sec:
+                take = gap_sec
+            if take < 60:
+                gaps.pop(gap_idx)
+                continue
+
+            start_dt = g_start
+            end_dt = start_dt + timedelta(seconds=take)
+            packed.append(
+                {
+                    **row,
+                    "start_dt": start_dt,
+                    "end_dt": end_dt,
+                    "seconds": take,
+                }
+            )
+            remaining -= take
+            if end_dt >= g_end or (g_end - end_dt).total_seconds() < 60:
+                gaps.pop(gap_idx)
+            else:
+                gaps[gap_idx][0] = end_dt
+
+    return timed + packed
+
+
+def _finalize_github_rows(rows: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], int]:
+    """Sort, format display fields, collapse repeated dates, recompute total."""
+    ordered = sorted(rows, key=lambda x: x["start_dt"])
+    total_seconds = 0
+    prev_date = ""
+    out: list[dict[str, Any]] = []
+    for idx, row in enumerate(ordered, start=1):
+        sec = max(60, int(row.get("seconds") or 0))
+        total_seconds += sec
+        date_str = row["start_dt"].strftime("%d/%m/%y")
+        date_display = date_str if date_str != prev_date else ""
+        prev_date = date_str
+        summary = row.get("task_summary") or row.get("task") or "Commit"
+        cleaned = {
+            k: v
+            for k, v in row.items()
+            if k not in {"start_dt", "end_dt"}
+        }
+        out.append(
+            {
+                **cleaned,
+                "sr": idx,
+                "date": date_str,
+                "date_display": date_display,
+                "in_time": row["start_dt"].strftime("%-I:%M %p"),
+                "out_time": row["end_dt"].strftime("%-I:%M %p"),
+                "total_time": _format_hhmm(sec),
+                "seconds": sec,
+                "task": summary,
+                "task_summary": summary,
+            }
+        )
+    return out, total_seconds
 
 
 def _parse_authored(value: str, tz: ZoneInfo) -> datetime | None:
@@ -223,6 +384,7 @@ def _rows_from_local_sessions(
             {
                 "sr": len(rows) + 1,
                 "date": start_dt.strftime("%d/%m/%y"),
+                "date_display": start_dt.strftime("%d/%m/%y"),
                 "in_time": start_dt.strftime("%-I:%M %p"),
                 "out_time": end_dt.strftime("%-I:%M %p"),
                 "total_time": _format_hhmm(sec),
@@ -236,6 +398,9 @@ def _rows_from_local_sessions(
                 "commit_count": len(commits) or int(session.get("commit_count") or 0),
                 "session_id": session.get("id"),
                 "source": "local_timer",
+                "start_dt": start_dt,
+                "end_dt": end_dt,
+                "seconds": sec,
             }
         )
     return rows, total_seconds
@@ -322,16 +487,18 @@ def build_github_daily_email_payload(
             authored = _parse_authored(c.get("authored_at") or "", tz)
             if not authored or authored.date() != target_day:
                 continue
-            # Keep uncovered commits visible, but still use 1 min placeholder.
+            # Keep uncovered commits visible as 1-min placeholders for packing.
             sec = 60
             total_seconds += sec
             summary = c.get("message") or c.get("short_sha") or "Commit"
+            end_dt = authored + timedelta(seconds=sec)
             rows.append(
                 {
                     "sr": len(rows) + 1,
                     "date": authored.strftime("%d/%m/%y"),
+                    "date_display": authored.strftime("%d/%m/%y"),
                     "in_time": authored.strftime("%-I:%M %p"),
-                    "out_time": authored.strftime("%-I:%M %p"),
+                    "out_time": end_dt.strftime("%-I:%M %p"),
                     "total_time": _format_hhmm(sec),
                     "project": c.get("project") or c.get("repo") or "GitHub",
                     "task": summary,
@@ -340,6 +507,9 @@ def build_github_daily_email_payload(
                     "sha": c.get("short_sha"),
                     "repo": c.get("repo"),
                     "source": "github_commit",
+                    "start_dt": authored,
+                    "end_dt": end_dt,
+                    "seconds": sec,
                 }
             )
     else:
@@ -367,13 +537,15 @@ def build_github_daily_email_payload(
             task_summary = summary
             if jira_keys:
                 task_summary = f"{summary} [{', '.join(jira_keys)}]"
+            end_dt = authored + timedelta(seconds=sec)
 
             rows.append(
                 {
                     "sr": idx,
                     "date": authored.strftime("%d/%m/%y"),
+                    "date_display": authored.strftime("%d/%m/%y"),
                     "in_time": authored.strftime("%-I:%M %p"),
-                    "out_time": authored.strftime("%-I:%M %p"),
+                    "out_time": end_dt.strftime("%-I:%M %p"),
                     "total_time": _format_hhmm(sec),
                     "project": c.get("project") or c.get("repo") or "GitHub",
                     "task": task_summary,
@@ -382,8 +554,23 @@ def build_github_daily_email_payload(
                     "sha": c.get("short_sha"),
                     "repo": c.get("repo"),
                     "source": "github_commit",
+                    "start_dt": authored,
+                    "end_dt": end_dt,
+                    "seconds": sec,
                 }
             )
+
+    # Pack direct GitHub commits into 9 AM–6 PM free gaps around local timers.
+    day_start_hour = int(os.getenv("DAILY_EMAIL_DAY_START_HOUR") or "9")
+    day_end_hour = int(os.getenv("DAILY_EMAIL_DAY_END_HOUR") or "18")
+    rows = _pack_github_commits_into_workday(
+        rows,
+        target_day=target_day,
+        tz=tz,
+        day_start_hour=day_start_hour,
+        day_end_hour=day_end_hour,
+    )
+    rows, total_seconds = _finalize_github_rows(rows)
 
     user_name = (
         (fallback_name or "").strip()
@@ -405,11 +592,18 @@ def build_github_daily_email_payload(
         else f"Source: GitHub commits ({target_day.isoformat()})"
     )
 
+    # Collapse repeated dates and drop index column for cleaner sheets.
+    prev_date = ""
+    for r in rows:
+        d = r.get("date") or ""
+        r["date_display"] = d if d != prev_date else ""
+        if d:
+            prev_date = d
+
     tr_html = "".join(
         f"""
         <tr>
-          <td style="border:1px solid #999;padding:6px;text-align:center;">{r['sr']}</td>
-          <td style="border:1px solid #999;padding:6px;text-align:center;">{r['date']}</td>
+          <td style="border:1px solid #999;padding:6px;text-align:center;">{r.get('date_display', r.get('date') or '')}</td>
           <td style="border:1px solid #999;padding:6px;text-align:center;">{r['in_time']}</td>
           <td style="border:1px solid #999;padding:6px;text-align:center;">{r['out_time']}</td>
           <td style="border:1px solid #999;padding:6px;text-align:center;">{r['total_time']}</td>
@@ -428,7 +622,6 @@ def build_github_daily_email_payload(
       <table style="border-collapse:collapse;width:100%;font-size:13px;">
         <thead>
           <tr style="background:#f3c623;">
-            <th style="border:1px solid #999;padding:6px;">#</th>
             <th style="border:1px solid #999;padding:6px;">Date</th>
             <th style="border:1px solid #999;padding:6px;">In-Time</th>
             <th style="border:1px solid #999;padding:6px;">Out-Time</th>
@@ -438,7 +631,7 @@ def build_github_daily_email_payload(
           </tr>
         </thead>
         <tbody>
-          {tr_html if rows else '<tr><td colspan="7" style="border:1px solid #999;padding:8px;text-align:center;">No commits or local timers found for this day.</td></tr>'}
+          {tr_html if rows else '<tr><td colspan="6" style="border:1px solid #999;padding:8px;text-align:center;">No commits or local timers found for this day.</td></tr>'}
         </tbody>
       </table>
       <p style="margin-top:12px;"><strong>Total:</strong> {_format_hhmm(total_seconds)}h</p>
@@ -447,11 +640,11 @@ def build_github_daily_email_payload(
     """
 
     table_lines = [
-        "# | Date | In-Time | Out-Time | Total Time | Project | Task",
+        "Date | In-Time | Out-Time | Total Time | Project | Task",
     ]
     for r in rows:
         table_lines.append(
-            f"{r['sr']} | {r['date']} | {r['in_time']} | {r['out_time']} | "
+            f"{r.get('date_display', r.get('date') or '')} | {r['in_time']} | {r['out_time']} | "
             f"{r['total_time']} | {r['project']} | {_task_cell_text(r)}"
         )
     rows_text = "\n".join(table_lines)
@@ -584,11 +777,18 @@ def build_github_local_timer_email_payload(
     to_list = _email_recipients(to_csv, req_to)
     cc_list = _email_recipients(cc_csv, req_cc)
 
+    # Collapse repeated dates and drop index column for cleaner sheets.
+    prev_date = ""
+    for r in rows:
+        d = r.get("date") or ""
+        r["date_display"] = d if d != prev_date else ""
+        if d:
+            prev_date = d
+
     tr_html = "".join(
         f"""
         <tr>
-          <td style="border:1px solid #999;padding:6px;text-align:center;">{r['sr']}</td>
-          <td style="border:1px solid #999;padding:6px;text-align:center;">{r['date']}</td>
+          <td style="border:1px solid #999;padding:6px;text-align:center;">{r.get('date_display', r.get('date') or '')}</td>
           <td style="border:1px solid #999;padding:6px;text-align:center;">{r['in_time']}</td>
           <td style="border:1px solid #999;padding:6px;text-align:center;">{r['out_time']}</td>
           <td style="border:1px solid #999;padding:6px;text-align:center;">{r['total_time']}</td>
@@ -607,7 +807,6 @@ def build_github_local_timer_email_payload(
       <table style="border-collapse:collapse;width:100%;font-size:13px;">
         <thead>
           <tr style="background:#f3c623;">
-            <th style="border:1px solid #999;padding:6px;">#</th>
             <th style="border:1px solid #999;padding:6px;">Date</th>
             <th style="border:1px solid #999;padding:6px;">In-Time</th>
             <th style="border:1px solid #999;padding:6px;">Out-Time</th>
@@ -617,7 +816,7 @@ def build_github_local_timer_email_payload(
           </tr>
         </thead>
         <tbody>
-          {tr_html if rows else '<tr><td colspan="7" style="border:1px solid #999;padding:8px;text-align:center;">No local timer sessions with commits for this day.</td></tr>'}
+          {tr_html if rows else '<tr><td colspan="6" style="border:1px solid #999;padding:8px;text-align:center;">No local timer sessions with commits for this day.</td></tr>'}
         </tbody>
       </table>
       <p style="margin-top:12px;"><strong>Total:</strong> {_format_hhmm(total_seconds)}h</p>
@@ -626,11 +825,11 @@ def build_github_local_timer_email_payload(
     """
 
     table_lines = [
-        "# | Date | In-Time | Out-Time | Total Time | Project | Task",
+        "Date | In-Time | Out-Time | Total Time | Project | Task",
     ]
     for r in rows:
         table_lines.append(
-            f"{r['sr']} | {r['date']} | {r['in_time']} | {r['out_time']} | "
+            f"{r.get('date_display', r.get('date') or '')} | {r['in_time']} | {r['out_time']} | "
             f"{r['total_time']} | {r['project']} | {_task_cell_text(r)}"
         )
     rows_text = "\n".join(table_lines)

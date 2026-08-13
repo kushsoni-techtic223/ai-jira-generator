@@ -21,8 +21,14 @@ from pydantic import BaseModel, Field
 try:
     from dotenv import load_dotenv
 
-    # override=True so .env edits apply on uvicorn --reload (parent env otherwise sticks)
-    load_dotenv(override=True)
+    # In desktop mode, Electron-provided env (FRONTEND_URL, BACKEND_DATA_DIR,
+    # DESKTOP_MODE) must win over backend/.env defaults.
+    _desktop_boot = (os.getenv("DESKTOP_MODE") or "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+    }
+    load_dotenv(override=not _desktop_boot)
 except ImportError:
     pass
 
@@ -226,6 +232,10 @@ def _cfg(
     return jira.resolve_config(overrides or None)
 
 
+def _desktop_mode() -> bool:
+    return (os.getenv("DESKTOP_MODE") or "").strip().lower() in {"1", "true", "yes"}
+
+
 def _handle_jira_errors(exc: Exception) -> None:
     if isinstance(exc, jira.JiraConfigError):
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -379,6 +389,37 @@ def jira_oauth_status(session_id: Optional[str] = Header(None, alias=SESSION_HEA
         "resources": session.get("resources") or [],
         "redirect_uri": setup["redirect_uri"],
         "setup": setup,
+    }
+
+
+@app.get("/auth/jira/resume")
+def jira_oauth_resume(session_id: Optional[str] = Header(None, alias=SESSION_HEADER)):
+    """
+    Desktop-only: restore the latest saved Jira session when the browser
+    localStorage session id is missing (e.g. localhost vs 127.0.0.1).
+    """
+    if not _desktop_mode():
+        raise HTTPException(status_code=404, detail="Not available")
+    sid = session_id
+    session = session_store.get_session(sid) if sid else None
+    if not session:
+        latest = session_store.get_latest_session()
+        if not latest:
+            return {"connected": False, "session_id": None}
+        sid, session = latest
+    # Touch updated_at so this remains the preferred resume target.
+    session_store.save_session(sid, session)
+    return {
+        "connected": True,
+        "session_id": sid,
+        "auth_type": session.get("auth_type") or "oauth",
+        "user_email": session.get("user_email"),
+        "user_name": session.get("user_name"),
+        "account_id": session.get("account_id"),
+        "site_name": session.get("site_name"),
+        "site_url": session.get("site_url"),
+        "cloud_id": session.get("cloud_id"),
+        "resources": session.get("resources") or [],
     }
 
 
@@ -759,7 +800,18 @@ def _reload_dotenv() -> None:
         from dotenv import load_dotenv
 
         env_path = os.path.join(os.path.dirname(__file__), ".env")
+        # Keep desktop/process overrides for paths and mode flags.
+        preserved = {
+            key: os.environ[key]
+            for key in (
+                "DESKTOP_MODE",
+                "BACKEND_DATA_DIR",
+                "FRONTEND_URL",
+            )
+            if key in os.environ
+        }
         load_dotenv(env_path, override=True)
+        os.environ.update(preserved)
     except ImportError:
         pass
 
@@ -788,8 +840,142 @@ def _parse_iso_local(value: str, tz: ZoneInfo) -> datetime:
     raw = (value or "").strip()
     if raw.endswith("Z"):
         raw = raw[:-1] + "+00:00"
+    # Jira-style +0530
+    if len(raw) >= 5 and raw[-5] in "+-" and raw[-3] != ":":
+        if raw[-5:].replace("+", "").replace("-", "").isdigit():
+            raw = raw[:-2] + ":" + raw[-2:]
     dt = datetime.fromisoformat(raw)
     return dt.astimezone(tz) if dt.tzinfo else dt.replace(tzinfo=tz)
+
+
+def _pack_manual_logs_into_workday(
+    logs: list[dict[str, Any]],
+    *,
+    target_day,
+    tz: ZoneInfo,
+    day_start_hour: int = 9,
+    day_end_hour: int = 18,
+) -> list[dict[str, Any]]:
+    """
+    Fit manual Jira worklogs (no real clock times) into free gaps of the workday.
+
+    Rules:
+    1. Local app timer rows keep their real In/Out times.
+    2. Manual Jira duration first fills morning free time (9 AM → first local timer).
+    3. Any remaining manual duration fills after local timers, up to 6 PM.
+    4. One manual log may split across morning + afternoon gaps if needed.
+    """
+    manual = [x for x in logs if x.get("source") == "jira"]
+    timed = [x for x in logs if x.get("source") != "jira"]
+    if not manual:
+        return logs
+
+    day_start = datetime(
+        target_day.year,
+        target_day.month,
+        target_day.day,
+        day_start_hour,
+        0,
+        0,
+        tzinfo=tz,
+    )
+    day_end = datetime(
+        target_day.year,
+        target_day.month,
+        target_day.day,
+        day_end_hour,
+        0,
+        0,
+        tzinfo=tz,
+    )
+
+    # Occupied blocks from real local timers, clipped to the workday.
+    occupied: list[tuple[datetime, datetime]] = []
+    for row in sorted(timed, key=lambda x: x["start_dt"]):
+        start = max(row["start_dt"], day_start)
+        end = min(row["end_dt"], day_end)
+        if end > start:
+            occupied.append((start, end))
+
+    # Merge overlapping occupied intervals.
+    merged: list[tuple[datetime, datetime]] = []
+    for start, end in occupied:
+        if not merged or start > merged[-1][1]:
+            merged.append((start, end))
+        else:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+
+    # Free gaps inside 9 AM–6 PM (morning first, then after local timers).
+    gaps: list[list[datetime]] = []
+    cursor = day_start
+    for start, end in merged:
+        if start > cursor:
+            gaps.append([cursor, start])
+        cursor = max(cursor, end)
+    if cursor < day_end:
+        gaps.append([cursor, day_end])
+
+    packed: list[dict[str, Any]] = []
+    for row in sorted(manual, key=lambda x: x["start_dt"]):
+        remaining = max(60, int(row.get("seconds") or 0))
+        while remaining > 0:
+            # Find first gap with usable time.
+            gap_idx = next(
+                (
+                    i
+                    for i, (g_start, g_end) in enumerate(gaps)
+                    if (g_end - g_start).total_seconds() >= 60
+                ),
+                None,
+            )
+            if gap_idx is None:
+                # No free workday time left — append after last placed/local end.
+                fallback_start = day_end
+                if packed:
+                    fallback_start = max(fallback_start, packed[-1]["end_dt"])
+                for t in timed:
+                    fallback_start = max(fallback_start, t["end_dt"])
+                packed.append(
+                    {
+                        **row,
+                        "start_dt": fallback_start,
+                        "end_dt": fallback_start + timedelta(seconds=remaining),
+                        "seconds": remaining,
+                    }
+                )
+                remaining = 0
+                break
+
+            g_start, g_end = gaps[gap_idx]
+            gap_sec = int((g_end - g_start).total_seconds())
+            take = min(remaining, gap_sec)
+            # Keep whole minutes for cleaner sheet times.
+            take = max(60, (take // 60) * 60)
+            if take > gap_sec:
+                take = gap_sec
+            if take < 60:
+                # Tiny leftover gap — skip it.
+                gaps.pop(gap_idx)
+                continue
+
+            start_dt = g_start
+            end_dt = start_dt + timedelta(seconds=take)
+            packed.append(
+                {
+                    **row,
+                    "start_dt": start_dt,
+                    "end_dt": end_dt,
+                    "seconds": take,
+                }
+            )
+            remaining -= take
+            # Shrink or remove this gap.
+            if end_dt >= g_end or (g_end - end_dt).total_seconds() < 60:
+                gaps.pop(gap_idx)
+            else:
+                gaps[gap_idx][0] = end_dt
+
+    return timed + packed
 
 
 def _build_daily_email_payload(
@@ -803,45 +989,126 @@ def _build_daily_email_payload(
         if req.date
         else datetime.now(tz).date()
     )
-    logs = session_store.list_worklogs(
-        account_id=session.get("account_id"), limit=1000
-    )
-    day_logs = []
-    for row in logs:
+    account_id = session.get("account_id")
+
+    def _normalize_row(row: dict[str, Any], *, source: str) -> dict[str, Any] | None:
         started = row.get("started_at")
         if not started:
-            continue
+            return None
         try:
-            start_dt = _parse_iso_local(started, tz)
+            start_dt = _parse_iso_local(str(started), tz)
         except Exception:
-            continue
+            return None
         if start_dt.date() != target_day:
-            continue
+            return None
         end_raw = row.get("ended_at")
         sec_from_row = int(row.get("seconds") or 0)
         if end_raw:
             try:
-                end_dt = _parse_iso_local(end_raw, tz)
+                end_dt = _parse_iso_local(str(end_raw), tz)
             except Exception:
                 end_dt = start_dt
         else:
-            # If ended_at is missing, derive out-time from duration if available
-            end_dt = start_dt if sec_from_row <= 0 else start_dt + timedelta(seconds=sec_from_row)
+            end_dt = (
+                start_dt
+                if sec_from_row <= 0
+                else start_dt + timedelta(seconds=sec_from_row)
+            )
         sec = int(sec_from_row or max(0, int((end_dt - start_dt).total_seconds())))
-        day_logs.append(
-            {
-                "issue_key": row.get("issue_key") or "",
-                "start_dt": start_dt,
-                "end_dt": end_dt,
-                "seconds": sec,
-            }
+        if sec <= 0:
+            return None
+        return {
+            "issue_key": row.get("issue_key") or "",
+            "start_dt": start_dt,
+            "end_dt": end_dt,
+            "seconds": sec,
+            "jira_worklog_id": str(row.get("jira_worklog_id") or ""),
+            "source": source,
+        }
+
+    day_logs: list[dict[str, Any]] = []
+    jira_by_id: dict[str, dict[str, Any]] = {}
+
+    # 1) Pull Jira worklogs for the day (manual + app-pushed).
+    try:
+        jira_logs = jira.list_my_worklogs_for_day(
+            cfg,
+            day_iso=str(target_day),
+            account_id=account_id,
         )
+    except Exception:
+        jira_logs = []
+    for row in jira_logs:
+        normalized = _normalize_row(row, source="jira")
+        if not normalized:
+            continue
+        jid = normalized["jira_worklog_id"]
+        if jid:
+            jira_by_id[jid] = normalized
+        day_logs.append(normalized)
+
+    # 2) Local timers: keep real clock times when present.
+    #    If a local row matches a Jira worklog, prefer local in/out times.
+    local_logs = session_store.list_worklogs(account_id=account_id, limit=1000)
+    for row in local_logs:
+        jid = str(row.get("jira_worklog_id") or "")
+        normalized = _normalize_row(
+            {
+                "issue_key": row.get("issue_key"),
+                "started_at": row.get("started_at"),
+                "ended_at": row.get("ended_at"),
+                "seconds": row.get("seconds"),
+                "jira_worklog_id": jid,
+            },
+            source="local",
+        )
+        if not normalized:
+            continue
+
+        matched_jira = None
+        if jid and jid in jira_by_id:
+            matched_jira = jira_by_id[jid]
+        else:
+            for existing in day_logs:
+                if existing.get("source") != "jira":
+                    continue
+                if (existing.get("issue_key") or "") != normalized["issue_key"]:
+                    continue
+                start_delta = abs(
+                    (existing["start_dt"] - normalized["start_dt"]).total_seconds()
+                )
+                sec_delta = abs(int(existing["seconds"]) - int(normalized["seconds"]))
+                if start_delta <= 120 and sec_delta <= 60:
+                    matched_jira = existing
+                    break
+
+        if matched_jira is not None:
+            # Replace Jira's arbitrary stamp with the real local timer window.
+            matched_jira["start_dt"] = normalized["start_dt"]
+            matched_jira["end_dt"] = normalized["end_dt"]
+            matched_jira["seconds"] = normalized["seconds"]
+            matched_jira["source"] = "local"
+            continue
+
+        day_logs.append(normalized)
+
+    # 3) Manual Jira-only logs (no local timer) → pack into 9 AM–6 PM.
+    day_start_hour = int(os.getenv("DAILY_EMAIL_DAY_START_HOUR") or "9")
+    day_end_hour = int(os.getenv("DAILY_EMAIL_DAY_END_HOUR") or "18")
+    day_logs = _pack_manual_logs_into_workday(
+        day_logs,
+        target_day=target_day,
+        tz=tz,
+        day_start_hour=day_start_hour,
+        day_end_hour=day_end_hour,
+    )
 
     issue_keys = sorted({x["issue_key"] for x in day_logs if x["issue_key"]})
     issue_briefs = jira.get_issue_briefs(cfg, issue_keys) if issue_keys else {}
 
     rows: list[dict[str, Any]] = []
     total_seconds = 0
+    prev_date = ""
     for idx, row in enumerate(sorted(day_logs, key=lambda x: x["start_dt"]), start=1):
         key = row["issue_key"]
         brief = issue_briefs.get(key, {})
@@ -854,10 +1121,14 @@ def _build_daily_email_payload(
         if url:
             task_text += f"\n{url}"
         task_text += f" - {_format_hhmm(sec)}h"
+        date_str = row["start_dt"].strftime("%d/%m/%y")
+        date_display = date_str if date_str != prev_date else ""
+        prev_date = date_str
         rows.append(
             {
                 "sr": idx,
-                "date": row["start_dt"].strftime("%d/%m/%y"),
+                "date": date_str,
+                "date_display": date_display,
                 "in_time": row["start_dt"].strftime("%-I:%M %p"),
                 "out_time": row["end_dt"].strftime("%-I:%M %p"),
                 "total_time": _format_hhmm(sec),
@@ -874,7 +1145,14 @@ def _build_daily_email_payload(
         or os.getenv("DAILY_EMAIL_USER_NAME")
         or "Team Member"
     )
-    subject = f"Today Task sheet : {user_name} [{target_day.strftime('%d-%m-%Y')}]"
+    today = datetime.now(tz).date()
+    if target_day == today:
+        day_label = "Today"
+    elif target_day == today - timedelta(days=1):
+        day_label = "Yesterday"
+    else:
+        day_label = "Task"
+    subject = f"{day_label} Task sheet : {user_name} [{target_day.strftime('%d-%m-%Y')}]"
     to_list = _email_recipients(os.getenv("DAILY_EMAIL_TO") or "", req.to)
     if not to_list:
         to_list = _fallback_recipients(session)
@@ -884,8 +1162,7 @@ def _build_daily_email_payload(
     tr_html = "".join(
         f"""
         <tr>
-          <td style="border:1px solid #999;padding:6px;text-align:center;">{r['sr']}</td>
-          <td style="border:1px solid #999;padding:6px;text-align:center;">{r['date']}</td>
+          <td style="border:1px solid #999;padding:6px;text-align:center;">{r['date_display']}</td>
           <td style="border:1px solid #999;padding:6px;text-align:center;">{r['in_time']}</td>
           <td style="border:1px solid #999;padding:6px;text-align:center;">{r['out_time']}</td>
           <td style="border:1px solid #999;padding:6px;text-align:center;">{r['total_time']}</td>
@@ -905,7 +1182,6 @@ def _build_daily_email_payload(
       <table style="border-collapse:collapse;width:100%;font-size:13px;">
         <thead>
           <tr style="background:#f3c623;">
-            <th style="border:1px solid #999;padding:6px;">#</th>
             <th style="border:1px solid #999;padding:6px;">Date</th>
             <th style="border:1px solid #999;padding:6px;">In-Time</th>
             <th style="border:1px solid #999;padding:6px;">Out-Time</th>
@@ -925,14 +1201,14 @@ def _build_daily_email_payload(
 
     # Table only — Total/Regards live in the outer template (avoid double signature).
     table_lines = [
-        "# | Date | In-Time | Out-Time | Total Time | Project | Task",
+        "Date | In-Time | Out-Time | Total Time | Project | Task",
     ]
     for r in rows:
         task_text = r["task_summary"]
         if r.get("task_url"):
             task_text += f" ({r['task_url']})"
         table_lines.append(
-            f"{r['sr']} | {r['date']} | {r['in_time']} | {r['out_time']} | "
+            f"{r['date_display']} | {r['in_time']} | {r['out_time']} | "
             f"{r['total_time']} | {r['project']} | {task_text}"
         )
     rows_text = "\n".join(table_lines)
@@ -1376,6 +1652,33 @@ def github_oauth_status(
         "html_url": session.get("html_url"),
         "redirect_uri": setup["redirect_uri"],
         "setup": setup,
+    }
+
+
+@app.get("/auth/github/resume")
+def github_oauth_resume(
+    session_id: Optional[str] = Header(None, alias=GITHUB_SESSION_HEADER),
+):
+    """Desktop-only: restore the latest saved GitHub session."""
+    if not _desktop_mode():
+        raise HTTPException(status_code=404, detail="Not available")
+    sid = session_id
+    session = gh_sessions.get_session(sid) if sid else None
+    if not session:
+        latest = gh_sessions.get_latest_session()
+        if not latest:
+            return {"connected": False, "session_id": None}
+        sid, session = latest
+    gh_sessions.save_session(sid, session)
+    return {
+        "connected": True,
+        "session_id": sid,
+        "auth_type": session.get("auth_type") or "oauth",
+        "username": session.get("username"),
+        "user_name": session.get("user_name"),
+        "user_email": session.get("user_email"),
+        "avatar_url": session.get("avatar_url"),
+        "html_url": session.get("html_url"),
     }
 
 

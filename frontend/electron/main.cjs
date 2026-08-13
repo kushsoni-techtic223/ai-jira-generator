@@ -1,4 +1,4 @@
-const { app, BrowserWindow, dialog, shell } = require("electron");
+const { app, BrowserWindow, dialog, shell, ipcMain } = require("electron");
 const { spawn, spawnSync } = require("node:child_process");
 const path = require("node:path");
 const fs = require("node:fs");
@@ -8,6 +8,7 @@ const FRONTEND_PORT = 3000;
 const BACKEND_PORT = 8000;
 const isProdFlag = process.argv.includes("--prod");
 const isDev = !app.isPackaged && !isProdFlag;
+const HOME_URL = `http://localhost:${FRONTEND_PORT}`;
 
 let backendProc = null;
 let frontendProc = null;
@@ -295,12 +296,16 @@ async function startServices() {
       ],
       backendDir,
       "backend",
-      { BACKEND_DATA_DIR: writableDataDir }
+      {
+        BACKEND_DATA_DIR: writableDataDir,
+        DESKTOP_MODE: "1",
+        FRONTEND_URL: `http://localhost:${FRONTEND_PORT}`,
+      }
     );
   }
   await waitForHttp(`http://127.0.0.1:${BACKEND_PORT}/auth/github/setup`);
 
-  const frontendUrl = `http://127.0.0.1:${FRONTEND_PORT}`;
+  const frontendUrl = `http://localhost:${FRONTEND_PORT}`;
   const frontendUp = await canConnect(frontendUrl);
   if (!frontendUp) {
     if (isDev && !app.isPackaged) {
@@ -324,7 +329,7 @@ async function startServices() {
         {
           ...(nodeRt.env || {}),
           PORT: String(FRONTEND_PORT),
-          HOSTNAME: "127.0.0.1",
+          HOSTNAME: "localhost",
         }
       );
     } else {
@@ -370,7 +375,7 @@ async function startServices() {
       }
     }
   }
-  await waitForHttp(`http://127.0.0.1:${FRONTEND_PORT}`);
+  await waitForHttp(`http://localhost:${FRONTEND_PORT}`);
 }
 
 function stopServices() {
@@ -386,6 +391,7 @@ function stopServices() {
 }
 
 function createWindow() {
+  const preloadPath = path.join(__dirname, "preload.cjs");
   win = new BrowserWindow({
     width: 1400,
     height: 900,
@@ -393,6 +399,7 @@ function createWindow() {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
+      preload: preloadPath,
     },
   });
 
@@ -401,8 +408,82 @@ function createWindow() {
     return { action: "deny" };
   });
 
-  win.loadURL(`http://127.0.0.1:${FRONTEND_PORT}`);
+  const injectBackButton = async () => {
+    try {
+      await win.webContents.executeJavaScript(`
+        (function () {
+          if (document.getElementById("dtl-electron-back")) return;
+          const btn = document.createElement("button");
+          btn.id = "dtl-electron-back";
+          btn.type = "button";
+          btn.title = "Go back";
+          btn.setAttribute("aria-label", "Go back");
+          btn.innerHTML = '<svg width="18" height="18" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M15.5 4.5L8 12l7.5 7.5" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+          btn.style.cssText = [
+            "position:fixed",
+            "top:40px",
+            "left:40px",
+            "z-index:2147483647",
+            "box-sizing:border-box",
+            "width:44px",
+            "height:44px",
+            "border-radius:9999px",
+            "border:1px solid #cbd5e1",
+            "background:#ffffff",
+            "box-shadow:0 10px 28px rgba(15,23,42,0.22)",
+            "cursor:pointer",
+            "color:#0f172a",
+            "display:inline-flex",
+            "align-items:center",
+            "justify-content:center",
+            "padding:0",
+            "margin:0",
+            "line-height:0",
+            "appearance:none",
+            "-webkit-appearance:none",
+          ].join(";");
+          btn.addEventListener("click", function (e) {
+            e.preventDefault();
+            e.stopPropagation();
+            if (window.dtlDesktop && typeof window.dtlDesktop.goBack === "function") {
+              window.dtlDesktop.goBack();
+              return;
+            }
+            if (window.history.length > 1) window.history.back();
+            else window.location.href = ${JSON.stringify(HOME_URL)};
+          });
+          (document.body || document.documentElement).appendChild(btn);
+        })();
+      `);
+    } catch (err) {
+      logLine(`Back button inject failed: ${err && err.message ? err.message : err}`);
+    }
+  };
+
+  win.webContents.on("did-finish-load", () => {
+    void injectBackButton();
+  });
+  win.webContents.on("dom-ready", () => {
+    void injectBackButton();
+  });
+
+  win.loadURL(HOME_URL);
 }
+
+ipcMain.handle("nav:go-back", (event) => {
+  const wc = event.sender;
+  if (wc.canGoBack()) {
+    wc.goBack();
+    return { ok: true, action: "back" };
+  }
+  wc.loadURL(HOME_URL);
+  return { ok: true, action: "home" };
+});
+
+ipcMain.handle("nav:go-home", (event) => {
+  event.sender.loadURL(HOME_URL);
+  return { ok: true, action: "home" };
+});
 
 app.on("window-all-closed", () => {
   stopServices();

@@ -1,4 +1,5 @@
-export const EMAIL_RECIPIENTS_KEY = "github-daily-email-recipients-v1";
+export const EMAIL_RECIPIENTS_KEY = "daily-email-recipients-v1";
+const LEGACY_EMAIL_RECIPIENTS_KEY = "github-daily-email-recipients-v1";
 
 export type EmailRecipientsPrefs = {
   to: string;
@@ -7,7 +8,9 @@ export type EmailRecipientsPrefs = {
 
 export function loadEmailRecipients(): EmailRecipientsPrefs {
   try {
-    const raw = localStorage.getItem(EMAIL_RECIPIENTS_KEY);
+    const raw =
+      localStorage.getItem(EMAIL_RECIPIENTS_KEY) ||
+      localStorage.getItem(LEGACY_EMAIL_RECIPIENTS_KEY);
     if (!raw) return { to: "", cc: "" };
     const parsed = JSON.parse(raw) as Partial<EmailRecipientsPrefs>;
     return {

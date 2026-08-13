@@ -27,7 +27,9 @@ export default function EmailRecipientFields({
           value={to}
           onChange={(e) => update({ to: e.target.value, cc })}
           placeholder="devansh@techtic.agency, brijen@techtic.agency"
-          className="mt-1 block w-full rounded-md border border-slate-300 px-3 py-2 text-sm"
+          autoComplete="off"
+          spellCheck={false}
+          className="relative z-10 mt-1 block w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 outline-none ring-0 focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100"
         />
         <span className="mt-1 block text-xs text-slate-500">
           Comma-separated. Saved locally in this browser.
@@ -40,7 +42,9 @@ export default function EmailRecipientFields({
           value={cc}
           onChange={(e) => update({ to, cc: e.target.value })}
           placeholder="optional@company.com"
-          className="mt-1 block w-full rounded-md border border-slate-300 px-3 py-2 text-sm"
+          autoComplete="off"
+          spellCheck={false}
+          className="relative z-10 mt-1 block w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 outline-none ring-0 focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100"
         />
       </label>
     </div>

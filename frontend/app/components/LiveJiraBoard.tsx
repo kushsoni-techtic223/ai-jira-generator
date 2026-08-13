@@ -21,8 +21,30 @@ import {
   jiraAuthHeaders,
   setJiraSessionId
 } from "../lib/jiraSession";
+import EmailRecipientFields from "./EmailRecipientFields";
+import {
+  emailListPayload,
+  loadEmailRecipients,
+} from "../lib/emailRecipients";
 
 import { API } from "../lib/api";
+
+function todayISO() {
+  const d = new Date();
+  const yyyy = d.getFullYear();
+  const mm = String(d.getMonth() + 1).padStart(2, "0");
+  const dd = String(d.getDate()).padStart(2, "0");
+  return `${yyyy}-${mm}-${dd}`;
+}
+
+function shiftISO(iso: string, days: number) {
+  const d = new Date(`${iso}T12:00:00`);
+  d.setDate(d.getDate() + days);
+  const yyyy = d.getFullYear();
+  const mm = String(d.getMonth() + 1).padStart(2, "0");
+  const dd = String(d.getDate()).padStart(2, "0");
+  return `${yyyy}-${mm}-${dd}`;
+}
 
 const columnStyles: Record<BoardColumn, string> = {
   Highest: "border-t-red-500 bg-red-50/40",
@@ -114,9 +136,18 @@ export default function LiveJiraBoard() {
   const [emailPreview, setEmailPreview] = useState<DailyEmailPreview | null>(null);
   const [preparingEmail, setPreparingEmail] = useState(false);
   const [sendingEmail, setSendingEmail] = useState(false);
+  const [emailDate, setEmailDate] = useState(todayISO());
+  const [emailTo, setEmailTo] = useState("");
+  const [emailCc, setEmailCc] = useState("");
 
   const timer = useWorkTimer();
   const { setTotals } = timer;
+
+  useEffect(() => {
+    const saved = loadEmailRecipients();
+    setEmailTo(saved.to);
+    setEmailCc(saved.cc);
+  }, []);
 
   const refreshAuth = useCallback(async () => {
     setLoadingAuth(true);
@@ -191,11 +222,45 @@ export default function LiveJiraBoard() {
     const boot = async () => {
       setLoadingAuth(true);
       try {
-        const headers: Record<string, string> = {};
-        const activeSid = sid || getJiraSessionId();
-        if (activeSid) headers["X-Jira-Session"] = activeSid;
+        let activeSid = sid || getJiraSessionId();
+        if (activeSid) {
+          const headers: Record<string, string> = {
+            "X-Jira-Session": activeSid,
+          };
+          const res = await axios.get<AuthStatus>(`${API}/auth/jira/status`, {
+            headers,
+          });
+          if (res.data.connected) {
+            setJiraSessionId(activeSid);
+            setAuth(res.data);
+            await loadProjects();
+            return;
+          }
+        }
+
+        // Desktop resume: recover last saved backend session if localStorage is empty/stale
+        try {
+          const resumeHeaders: Record<string, string> = {};
+          if (activeSid) resumeHeaders["X-Jira-Session"] = activeSid;
+          const resume = await axios.get(`${API}/auth/jira/resume`, {
+            headers: resumeHeaders,
+          });
+          if (resume.data?.connected && resume.data?.session_id) {
+            activeSid = resume.data.session_id;
+            setJiraSessionId(activeSid);
+            const res = await axios.get<AuthStatus>(`${API}/auth/jira/status`, {
+              headers: { "X-Jira-Session": activeSid },
+            });
+            setAuth(res.data);
+            if (res.data.connected) await loadProjects();
+            return;
+          }
+        } catch {
+          // Resume endpoint is desktop-only; ignore on deployed web.
+        }
+
         const res = await axios.get<AuthStatus>(`${API}/auth/jira/status`, {
-          headers,
+          headers: activeSid ? { "X-Jira-Session": activeSid } : {},
         });
         setAuth(res.data);
         if (res.data.connected) await loadProjects();
@@ -335,10 +400,19 @@ export default function LiveJiraBoard() {
     try {
       const res = await axios.post<DailyEmailPreview>(
         `${API}/reports/daily-email/preview`,
-        {},
+        {
+          date: emailDate,
+          ...emailListPayload(emailTo, emailCc),
+        },
         { headers: jiraAuthHeaders() }
       );
       setEmailPreview(res.data);
+      if (!emailTo.trim() && res.data.to?.length) {
+        setEmailTo(res.data.to.join(", "));
+      }
+      if (!emailCc.trim() && res.data.cc?.length) {
+        setEmailCc(res.data.cc.join(", "));
+      }
     } catch (err: any) {
       setError(
         err?.response?.data?.detail ||
@@ -356,7 +430,10 @@ export default function LiveJiraBoard() {
     try {
       const res = await axios.post(
         `${API}/reports/daily-email/send`,
-        {},
+        {
+          date: emailDate,
+          ...emailListPayload(emailTo, emailCc),
+        },
         { headers: jiraAuthHeaders() }
       );
       if (res.data?.sent) {
@@ -374,13 +451,22 @@ export default function LiveJiraBoard() {
 
   const openMailtoDraft = () => {
     if (!emailPreview) return;
-    const toList = (emailPreview.to || []).filter(Boolean);
-    const ccList = (emailPreview.cc || []).filter(Boolean);
-
-    const toPath = toList
+    const toList = (
+      emailTo.trim()
+        ? emailTo.split(",")
+        : emailPreview.to || []
+    )
       .map((x) => x.trim())
-      .filter(Boolean)
-      .join(",");
+      .filter(Boolean);
+    const ccList = (
+      emailCc.trim()
+        ? emailCc.split(",")
+        : emailPreview.cc || []
+    )
+      .map((x) => x.trim())
+      .filter(Boolean);
+
+    const toPath = toList.join(",");
 
     // Use explicit encoding for query values only.
     // Do not encode the full "to" path; over-encoding can break Mail.app.
@@ -452,7 +538,10 @@ export default function LiveJiraBoard() {
 
       await axios.post(
         `${API}/reports/daily-email/open-mail-app`,
-        {},
+        {
+          date: emailDate,
+          ...emailListPayload(emailTo, emailCc),
+        },
         { headers: jiraAuthHeaders(), timeout: 30000 }
       );
     } catch (err: any) {
@@ -486,8 +575,16 @@ export default function LiveJiraBoard() {
       params.set("view", "cm");
       params.set("fs", "1");
       params.set("tf", "1");
-      if (emailPreview.to.length) params.set("to", emailPreview.to.join(","));
-      if (emailPreview.cc.length) params.set("cc", emailPreview.cc.join(","));
+      if (emailTo.trim() || emailPreview.to.length)
+        params.set(
+          "to",
+          emailTo.trim() || emailPreview.to.join(",")
+        );
+      if (emailCc.trim() || emailPreview.cc.length)
+        params.set(
+          "cc",
+          emailCc.trim() || emailPreview.cc.join(",")
+        );
       params.set("su", emailPreview.subject);
       window.open(
         `https://mail.google.com/mail/?${params.toString()}`,
@@ -783,14 +880,50 @@ export default function LiveJiraBoard() {
               >
                 Disconnect
               </button>
-              <button
-                type="button"
-                onClick={previewDailyEmail}
-                disabled={preparingEmail}
-                className="rounded-lg border border-indigo-300 bg-indigo-50 px-4 py-2 text-sm font-semibold text-indigo-800 hover:bg-indigo-100 disabled:opacity-60"
-              >
-                {preparingEmail ? "Preparing email…" : "Preview daily email"}
-              </button>
+            </div>
+
+            <div className="rounded-xl border border-indigo-100 bg-indigo-50/40 p-4">
+              <div className="mb-3 flex flex-wrap items-end gap-3">
+                <label className="text-sm text-slate-700">
+                  Sheet date
+                  <input
+                    type="date"
+                    value={emailDate}
+                    onChange={(e) => setEmailDate(e.target.value)}
+                    className="mt-1 block rounded-md border border-slate-300 px-3 py-2 text-sm"
+                  />
+                </label>
+                <button
+                  type="button"
+                  onClick={() => setEmailDate(todayISO())}
+                  className="rounded-md border border-slate-300 bg-white px-3 py-2 text-sm font-semibold text-slate-800 hover:bg-slate-50"
+                >
+                  Today
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setEmailDate(shiftISO(todayISO(), -1))}
+                  className="rounded-md border border-slate-300 bg-white px-3 py-2 text-sm font-semibold text-slate-800 hover:bg-slate-50"
+                >
+                  Yesterday
+                </button>
+                <button
+                  type="button"
+                  onClick={previewDailyEmail}
+                  disabled={preparingEmail}
+                  className="rounded-lg border border-indigo-300 bg-indigo-50 px-4 py-2 text-sm font-semibold text-indigo-800 hover:bg-indigo-100 disabled:opacity-60"
+                >
+                  {preparingEmail ? "Preparing email…" : "Preview daily email"}
+                </button>
+              </div>
+              <EmailRecipientFields
+                to={emailTo}
+                cc={emailCc}
+                onChange={({ to, cc }) => {
+                  setEmailTo(to);
+                  setEmailCc(cc);
+                }}
+              />
             </div>
 
             {lastSyncedAt && data && (
@@ -891,9 +1024,9 @@ export default function LiveJiraBoard() {
       )}
 
       {emailPreview && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 p-4">
-          <div className="w-full max-w-5xl rounded-xl bg-white shadow-2xl">
-            <div className="flex items-start justify-between gap-3 border-b border-slate-200 px-5 py-4">
+        <div className="fixed inset-0 z-50 flex items-center justify-center overflow-y-auto bg-slate-900/60 p-4">
+          <div className="my-auto flex max-h-[min(92vh,920px)] w-full max-w-5xl flex-col overflow-hidden rounded-xl bg-white shadow-2xl">
+            <div className="flex shrink-0 items-start justify-between gap-3 border-b border-slate-200 px-5 py-4">
               <div>
                 <p className="text-xs uppercase tracking-wide text-slate-500">
                   Daily Email Preview
@@ -902,9 +1035,7 @@ export default function LiveJiraBoard() {
                   {emailPreview.subject}
                 </h3>
                 <p className="mt-1 text-xs text-slate-600">
-                  To: {emailPreview.to.join(", ") || "—"} | Cc:{" "}
-                  {emailPreview.cc.join(", ") || "—"} | Total:{" "}
-                  {emailPreview.total_time}h
+                  Date: {emailPreview.date} | Total: {emailPreview.total_time}h
                 </p>
               </div>
               <button
@@ -915,14 +1046,59 @@ export default function LiveJiraBoard() {
                 Close
               </button>
             </div>
-            <div className="max-h-[70vh] overflow-auto p-5">
-              <div
-                className="prose max-w-none"
-                dangerouslySetInnerHTML={{ __html: emailPreview.html }}
-              />
+            <div className="min-h-0 flex-1 overflow-y-auto">
+              <div className="border-b border-slate-200 px-5 py-4">
+                <EmailRecipientFields
+                  to={emailTo}
+                  cc={emailCc}
+                  onChange={({ to, cc }) => {
+                    setEmailTo(to);
+                    setEmailCc(cc);
+                  }}
+                />
+                <div className="mt-3 flex flex-wrap items-end gap-3">
+                  <label className="text-sm text-slate-700">
+                    Sheet date
+                    <input
+                      type="date"
+                      value={emailDate}
+                      onChange={(e) => setEmailDate(e.target.value)}
+                      className="mt-1 block rounded-md border border-slate-300 px-3 py-2 text-sm"
+                    />
+                  </label>
+                  <button
+                    type="button"
+                    onClick={() => setEmailDate(todayISO())}
+                    className="rounded-md border border-slate-300 bg-white px-3 py-2 text-sm font-semibold text-slate-800 hover:bg-slate-50"
+                  >
+                    Today
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setEmailDate(shiftISO(todayISO(), -1))}
+                    className="rounded-md border border-slate-300 bg-white px-3 py-2 text-sm font-semibold text-slate-800 hover:bg-slate-50"
+                  >
+                    Yesterday
+                  </button>
+                  <button
+                    type="button"
+                    onClick={previewDailyEmail}
+                    disabled={preparingEmail}
+                    className="rounded-md border border-indigo-300 bg-indigo-50 px-3 py-2 text-sm font-semibold text-indigo-800 hover:bg-indigo-100 disabled:opacity-60"
+                  >
+                    {preparingEmail ? "Refreshing…" : "Refresh preview"}
+                  </button>
+                </div>
+              </div>
+              <div className="p-5">
+                <div
+                  className="prose max-w-none"
+                  dangerouslySetInnerHTML={{ __html: emailPreview.html }}
+                />
+              </div>
             </div>
-            <div className="flex items-center justify-end gap-3 border-t border-slate-200 px-5 py-4">
-              <span className="mr-auto text-xs text-slate-600">
+            <div className="flex shrink-0 flex-wrap items-center justify-end gap-3 border-t border-slate-200 bg-white px-5 py-4">
+              <span className="mr-auto max-w-sm text-xs text-slate-600">
                 Prefer Gmail on the deployed site. Mac Mail works fully only with a
                 local Mac backend — otherwise it opens mailto + paste (Cmd+V).
               </span>

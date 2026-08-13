@@ -831,6 +831,128 @@ def _to_jira_datetime(iso_str: str) -> str:
     return dt.strftime("%Y-%m-%dT%H:%M:%S.000") + offset
 
 
+def _parse_jira_datetime(value: str):
+    """Parse Jira worklog started timestamps (+0530 / Z / offset)."""
+    from datetime import datetime, timezone
+
+    raw = (value or "").strip()
+    if not raw:
+        raise ValueError("empty datetime")
+    if raw.endswith("Z"):
+        raw = raw[:-1] + "+00:00"
+    # Jira often returns +0530 without a colon
+    if re.search(r"[+-]\d{4}$", raw):
+        raw = raw[:-2] + ":" + raw[-2:]
+    dt = datetime.fromisoformat(raw)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+def list_issue_worklogs(cfg: dict[str, str], issue_key: str) -> list[dict[str, Any]]:
+    """All worklogs on one issue (paginated)."""
+    out: list[dict[str, Any]] = []
+    start_at = 0
+    page_size = 100
+    while True:
+        data = _request(
+            cfg,
+            "GET",
+            f"/rest/api/3/issue/{issue_key}/worklog",
+            params={"startAt": start_at, "maxResults": page_size},
+        ) or {}
+        batch = data.get("worklogs") or []
+        out.extend(batch)
+        total = int(data.get("total") or 0)
+        start_at += len(batch)
+        if not batch or start_at >= total:
+            break
+    return out
+
+
+def list_my_worklogs_for_day(
+    cfg: dict[str, str],
+    *,
+    day_iso: str,
+    account_id: str | None = None,
+    max_issues: int = 100,
+) -> list[dict[str, Any]]:
+    """
+    Worklogs authored by the current user (or account_id) on a calendar day.
+
+    Includes time logged manually in Jira and time pushed from this app.
+    Returns normalized rows:
+      issue_key, seconds, started_at, ended_at, jira_worklog_id, source
+    """
+    from datetime import timedelta
+
+    day = (day_iso or "").strip()
+    if not re.match(r"^\d{4}-\d{2}-\d{2}$", day):
+        raise JiraConfigError("day_iso must be YYYY-MM-DD")
+
+    jql = (
+        f'worklogAuthor = currentUser() AND worklogDate = "{day}" '
+        "ORDER BY updated DESC"
+    )
+    issues = search_issues(
+        cfg,
+        jql,
+        max_results=max_issues,
+        fields=["summary", "project"],
+    )
+
+    account = (account_id or "").strip()
+    email = ""
+    if not account:
+        try:
+            me = resolve_current_user(cfg)
+            account = (me.get("account_id") or "").strip()
+            email = (me.get("email") or "").strip().lower()
+        except Exception:
+            pass
+
+    rows: list[dict[str, Any]] = []
+    for issue in issues:
+        key = (issue.get("key") or "").strip()
+        if not key:
+            continue
+        try:
+            worklogs = list_issue_worklogs(cfg, key)
+        except JiraApiError:
+            continue
+        for wl in worklogs:
+            author = wl.get("author") or {}
+            author_id = (author.get("accountId") or "").strip()
+            author_email = (author.get("emailAddress") or "").strip().lower()
+            if account and author_id and author_id != account:
+                continue
+            if not account and email and author_email and author_email != email:
+                continue
+            # If we still have no identity, keep entries from worklogAuthor-scoped issues.
+            started_raw = wl.get("started") or ""
+            try:
+                start_dt = _parse_jira_datetime(started_raw)
+            except Exception:
+                continue
+            seconds = int(wl.get("timeSpentSeconds") or 0)
+            if seconds <= 0:
+                continue
+            ended = start_dt + timedelta(seconds=seconds)
+            rows.append(
+                {
+                    "issue_key": key,
+                    "seconds": seconds,
+                    "started_at": start_dt.isoformat(),
+                    "ended_at": ended.isoformat(),
+                    "jira_worklog_id": str(wl.get("id") or ""),
+                    "account_id": author_id or account or None,
+                    "source": "jira",
+                    "comment": adf_to_text(wl.get("comment")),
+                }
+            )
+    return rows
+
+
 def build_project_jql(project_key: str, *, current_sprint: bool = True) -> str:
     key = re.sub(r"[^A-Za-z0-9_\-]", "", project_key)
     parts = [f'project = "{key}"']

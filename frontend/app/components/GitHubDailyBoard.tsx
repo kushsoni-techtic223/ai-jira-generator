@@ -47,6 +47,7 @@ type EmailPreview = {
   rows: Array<{
     sr: number;
     date: string;
+    date_display?: string;
     in_time: string;
     out_time: string;
     total_time: string;
@@ -256,32 +257,56 @@ export default function GitHubDailyBoard() {
       .catch(() => setOauthConfigured(false));
 
     const boot = async () => {
-      const sid = ghSid || loadStored()?.sessionId || null;
       const stored = loadStored();
-      if (!sid) return;
-      try {
+      let sid = ghSid || stored?.sessionId || null;
+      const tryConnect = async (nextSid: string) => {
         const res = await axios.get(`${API}/auth/github/status`, {
-          headers: ghHeaders(sid),
+          headers: ghHeaders(nextSid),
         });
-        if (!res.data.connected) {
-          if (ghSid) setError("GitHub session expired. Connect again.");
-          clearStored();
-          return;
-        }
+        if (!res.data.connected) return false;
         await applyConnected(
-          sid,
+          nextSid,
           res.data.username || stored?.username || "",
           res.data.user_name || stored?.displayName || res.data.username || "",
           stored?.selectedRepos || []
         );
-        if (connectedFlag || ghSid) {
-          const url = new URL(window.location.href);
-          url.searchParams.delete("gh_sid");
-          url.searchParams.delete("github");
-          url.searchParams.delete("github_error");
-          url.searchParams.set("tab", "github");
-          window.history.replaceState({}, "", url.toString());
+        return true;
+      };
+
+      try {
+        if (sid) {
+          const ok = await tryConnect(sid);
+          if (ok) {
+            if (connectedFlag || ghSid) {
+              const url = new URL(window.location.href);
+              url.searchParams.delete("gh_sid");
+              url.searchParams.delete("github");
+              url.searchParams.delete("github_error");
+              url.searchParams.set("tab", "github");
+              window.history.replaceState({}, "", url.toString());
+            }
+            return;
+          }
+          if (ghSid) setError("GitHub session expired. Connect again.");
         }
+
+        try {
+          const resumeHeaders: Record<string, string> = {};
+          if (sid) resumeHeaders["X-Github-Session"] = sid;
+          const resume = await axios.get(`${API}/auth/github/resume`, {
+            headers: resumeHeaders,
+          });
+          if (resume.data?.connected && resume.data?.session_id) {
+            const resumedSid = String(resume.data.session_id);
+            sid = resumedSid;
+            const ok = await tryConnect(resumedSid);
+            if (ok) return;
+          }
+        } catch {
+          // Resume is desktop-only.
+        }
+
+        if (sid && !ghSid) clearStored();
       } catch {
         /* ignore */
       }
@@ -845,7 +870,6 @@ export default function GitHubDailyBoard() {
             <table className="min-w-full border-collapse overflow-hidden rounded-lg text-sm">
               <thead>
                 <tr className="bg-amber-300 text-left text-xs uppercase tracking-wide text-amber-950">
-                  <th className="border border-amber-400/60 px-2.5 py-2">#</th>
                   <th className="border border-amber-400/60 px-2.5 py-2">Date</th>
                   <th className="border border-amber-400/60 px-2.5 py-2">In-Time</th>
                   <th className="border border-amber-400/60 px-2.5 py-2">Out-Time</th>
@@ -860,23 +884,26 @@ export default function GitHubDailyBoard() {
                 {previewRows.length === 0 ? (
                   <tr>
                     <td
-                      colSpan={7}
+                      colSpan={6}
                       className="border border-slate-200 px-3 py-6 text-center text-slate-500"
                     >
                       No commits by you on the selected projects for this day.
                     </td>
                   </tr>
                 ) : (
-                  previewRows.map((r, idx) => (
+                  previewRows.map((r, idx) => {
+                    const prevDate =
+                      idx > 0 ? previewRows[idx - 1]?.date || "" : "";
+                    const dateDisplay =
+                      r.date_display ??
+                      (r.date !== prevDate ? r.date : "");
+                    return (
                     <tr
-                      key={`${r.sr}-${r.sha || r.task_summary}`}
+                      key={`${r.sr}-${r.sha || r.task_summary}-${idx}`}
                       className="odd:bg-white even:bg-slate-50/70"
                     >
-                      <td className="border border-slate-200 px-2.5 py-2 text-center text-slate-600">
-                        {idx + 1}
-                      </td>
                       <td className="border border-slate-200 px-2.5 py-2 text-center">
-                        {r.date}
+                        {dateDisplay}
                       </td>
                       <td className="border border-slate-200 px-2.5 py-2 text-center">
                         {r.in_time}
@@ -930,7 +957,8 @@ export default function GitHubDailyBoard() {
                         )}
                       </td>
                     </tr>
-                  ))
+                    );
+                  })
                 )}
               </tbody>
             </table>
@@ -939,9 +967,9 @@ export default function GitHubDailyBoard() {
       )}
 
       {emailOpen && preview && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
-          <div className="max-h-[90vh] w-full max-w-3xl overflow-hidden rounded-2xl bg-white shadow-xl">
-            <div className="flex items-start justify-between border-b border-slate-200 px-5 py-4">
+        <div className="fixed inset-0 z-50 flex items-center justify-center overflow-y-auto bg-black/40 p-4">
+          <div className="my-auto flex max-h-[min(92vh,900px)] w-full max-w-3xl flex-col overflow-hidden rounded-2xl bg-white shadow-xl">
+            <div className="flex shrink-0 items-start justify-between border-b border-slate-200 px-5 py-4">
               <div>
                 <h3 className="font-semibold text-slate-900">
                   {preview.subject}
@@ -959,10 +987,10 @@ export default function GitHubDailyBoard() {
               </button>
             </div>
             <div
-              className="max-h-[55vh] overflow-auto p-5"
+              className="min-h-0 flex-1 overflow-y-auto p-5"
               dangerouslySetInnerHTML={{ __html: preview.html }}
             />
-            <div className="flex flex-wrap items-center justify-end gap-2 border-t border-slate-200 px-5 py-4">
+            <div className="flex shrink-0 flex-wrap items-center justify-end gap-2 border-t border-slate-200 bg-white px-5 py-4">
               <button
                 type="button"
                 onClick={() => setEmailOpen(false)}

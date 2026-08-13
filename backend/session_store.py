@@ -141,6 +141,22 @@ def get_session(session_id: str | None) -> dict[str, Any] | None:
         return data
 
 
+def get_latest_session() -> tuple[str, dict[str, Any]] | None:
+    """Return the most recently updated valid session (desktop resume)."""
+    with _lock:
+        sessions = _load_sessions()
+    best: tuple[str, dict[str, Any], str] | None = None
+    for sid, data in sessions.items():
+        if not isinstance(data, dict) or not _is_valid_session(data):
+            continue
+        updated = str(data.get("updated_at") or "")
+        if best is None or updated > best[2]:
+            best = (sid, data, updated)
+    if not best:
+        return None
+    return best[0], best[1]
+
+
 def clear_session(session_id: str | None) -> None:
     if not session_id:
         return

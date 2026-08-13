@@ -101,6 +101,24 @@ def get_session(session_id: str | None) -> dict[str, Any] | None:
         return data
 
 
+def get_latest_session() -> tuple[str, dict[str, Any]] | None:
+    """Return the most recently updated valid GitHub session (desktop resume)."""
+    with _lock:
+        sessions = _read(SESSIONS_PATH, {})
+    if not isinstance(sessions, dict):
+        return None
+    best: tuple[str, dict[str, Any], str] | None = None
+    for sid, data in sessions.items():
+        if not isinstance(data, dict) or not data.get("access_token"):
+            continue
+        updated = str(data.get("updated_at") or "")
+        if best is None or updated > best[2]:
+            best = (sid, data, updated)
+    if not best:
+        return None
+    return best[0], best[1]
+
+
 def clear_session(session_id: str | None) -> None:
     if not session_id:
         return
