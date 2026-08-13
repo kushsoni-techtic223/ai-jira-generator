@@ -40,6 +40,118 @@ def _format_hhmm(seconds: int) -> str:
     return f"{h}:{m:02d}"
 
 
+def _parse_extra_duration_seconds(
+    *,
+    total_minutes: int | None = None,
+    total_time: str | None = None,
+) -> int:
+    if total_minutes is not None and int(total_minutes) > 0:
+        return max(60, int(total_minutes) * 60)
+    raw = (total_time or "").strip()
+    if not raw:
+        raise ValueError("Manual row needs total_minutes or total_time (H:MM).")
+    if ":" in raw:
+        parts = raw.split(":")
+        if len(parts) != 2:
+            raise ValueError(f"Invalid total_time '{raw}' (use H:MM).")
+        h = int(parts[0])
+        m = int(parts[1])
+        if h < 0 or m < 0 or m >= 60:
+            raise ValueError(f"Invalid total_time '{raw}' (use H:MM).")
+        return max(60, (h * 60 + m) * 60)
+    hours = float(raw)
+    if hours <= 0:
+        raise ValueError(f"Invalid total_time '{raw}'.")
+    return max(60, int(round(hours * 3600)))
+
+
+def apply_manual_extra_rows(
+    rows: list[dict[str, Any]],
+    extra_rows: list[Any] | None,
+    *,
+    target_day,
+) -> tuple[list[dict[str, Any]], int]:
+    """
+    Insert sheet-only manual rows. Never invents/overrides In/Out on timer rows.
+    Manual In/Out are always "—"; only Task + Duration are added.
+    """
+    def _row_seconds(r: dict[str, Any]) -> int:
+        if r.get("seconds"):
+            return int(r["seconds"])
+        tt = str(r.get("total_time") or "")
+        if ":" in tt:
+            try:
+                h, m = tt.split(":", 1)
+                return (int(h) * 60 + int(m)) * 60
+            except Exception:
+                return 0
+        return 0
+
+    if not extra_rows:
+        return rows, sum(_row_seconds(r) for r in rows)
+
+    working = list(rows)
+    inserts: list[tuple[int, dict[str, Any]]] = []
+    date_str = target_day.strftime("%d/%m/%y")
+
+    for extra in extra_rows:
+        if isinstance(extra, dict):
+            task = (extra.get("task") or "").strip()
+            total_minutes = extra.get("total_minutes")
+            total_time = extra.get("total_time")
+            project = extra.get("project")
+            insert_at = extra.get("insert_at")
+        else:
+            task = (getattr(extra, "task", None) or "").strip()
+            total_minutes = getattr(extra, "total_minutes", None)
+            total_time = getattr(extra, "total_time", None)
+            project = getattr(extra, "project", None)
+            insert_at = getattr(extra, "insert_at", None)
+        if not task:
+            continue
+        sec = _parse_extra_duration_seconds(
+            total_minutes=total_minutes,
+            total_time=total_time,
+        )
+        hhmm = _format_hhmm(sec)
+        pos = len(working) if insert_at is None else max(0, int(insert_at))
+        inserts.append(
+            (
+                pos,
+                {
+                    "sr": 0,
+                    "date": date_str,
+                    "date_display": "",
+                    "in_time": "—",
+                    "out_time": "—",
+                    "total_time": hhmm,
+                    "seconds": sec,
+                    "project": (str(project or "").strip() or "Other"),
+                    "task": f"{task} - {hhmm}h",
+                    "task_summary": task,
+                    "task_url": None,
+                    "manual": True,
+                    "source": "manual",
+                },
+            )
+        )
+
+    for pos, row in sorted(inserts, key=lambda x: x[0], reverse=True):
+        working.insert(min(pos, len(working)), row)
+
+    prev_date = ""
+    total_seconds = 0
+    for idx, row in enumerate(working, start=1):
+        row["sr"] = idx
+        d = row.get("date") or date_str
+        row["date"] = d
+        row["date_display"] = d if d != prev_date else ""
+        prev_date = d
+        total_seconds += _row_seconds(row)
+
+    return working, total_seconds
+
+
 def _pack_github_commits_into_workday(
     rows: list[dict[str, Any]],
     *,
@@ -417,6 +529,7 @@ def build_github_daily_email_payload(
     repos_csv: str | None = None,
     author_email: str | None = None,
     local_sessions: list[dict[str, Any]] | None = None,
+    extra_rows: list[Any] | None = None,
 ) -> dict[str, Any]:
     """
     Build the same sheet shape as the Jira daily email.
@@ -571,6 +684,9 @@ def build_github_daily_email_payload(
         day_end_hour=day_end_hour,
     )
     rows, total_seconds = _finalize_github_rows(rows)
+    rows, total_seconds = apply_manual_extra_rows(
+        rows, extra_rows, target_day=target_day
+    )
 
     user_name = (
         (fallback_name or "").strip()

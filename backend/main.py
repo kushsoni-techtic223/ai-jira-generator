@@ -153,6 +153,10 @@ class GitHubDailyRequest(BaseModel):
         None,
         description="Owner key from local timer storage to scope saved local sessions",
     )
+    extra_rows: Optional[list[ManualSheetRow]] = Field(
+        None,
+        description="Manual tasks to insert (sheet only; does not change timer In/Out)",
+    )
 
 
 class GitHubConnectRequest(BaseModel):
@@ -2244,6 +2248,7 @@ def github_daily_email_preview(
             repos_csv=repos,
             author_email=body.author_email,
             local_sessions=local_sessions,
+            extra_rows=body.extra_rows,
         )
         if not payload.get("to"):
             raise gh.GitHubConfigError(
@@ -2285,6 +2290,7 @@ def github_daily_email_open_mail_app(
             repos_csv=repos,
             author_email=body.author_email,
             local_sessions=local_sessions,
+            extra_rows=body.extra_rows,
         )
         if not payload.get("to"):
             raise gh.GitHubConfigError(

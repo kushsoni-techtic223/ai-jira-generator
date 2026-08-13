@@ -12,6 +12,13 @@ export type SheetRow = {
   task_summary?: string;
   task_url?: string | null;
   manual?: boolean;
+  task_commits?: Array<{
+    summary: string;
+    url?: string;
+    short_sha?: string;
+  }>;
+  sha?: string;
+  source?: string;
 };
 
 export type EditableSheetRow = SheetRow & {
@@ -183,10 +190,29 @@ export function buildDailySheetHtml(opts: {
 }) {
   const trHtml = opts.rows
     .map((r) => {
-      const summary = escapeHtml(r.task_summary || r.task || "");
-      const url = r.task_url
-        ? `<br><a href="${escapeHtml(r.task_url)}">${escapeHtml(r.task_url)}</a>`
-        : "";
+      let taskInner = "";
+      if (r.task_commits && r.task_commits.length > 0) {
+        taskInner = r.task_commits
+          .map((c) => {
+            const summary = escapeHtml(c.summary || "");
+            const url = c.url
+              ? `<br><a href="${escapeHtml(c.url)}">${escapeHtml(c.url)}</a>`
+              : "";
+            return `<div style="margin-bottom:6px;">${summary}${url}</div>`;
+          })
+          .join("");
+      } else {
+        const summary = escapeHtml(r.task_summary || r.task || "");
+        const url = r.task_url
+          ? `<br><a href="${escapeHtml(r.task_url)}">${escapeHtml(r.task_url)}</a>`
+          : "";
+        taskInner = `${summary}${url}${
+          r.manual ? "" : `<span> - ${escapeHtml(r.total_time || "")}h</span>`
+        }`;
+        if (r.manual) {
+          taskInner += `<span> - ${escapeHtml(r.total_time || "")}h</span>`;
+        }
+      }
       return `
         <tr>
           <td style="border:1px solid #999;padding:6px;text-align:center;">${escapeHtml(r.date_display || "")}</td>
@@ -195,9 +221,7 @@ export function buildDailySheetHtml(opts: {
           <td style="border:1px solid #999;padding:6px;text-align:center;">${escapeHtml(r.total_time || "")}</td>
           <td style="border:1px solid #999;padding:6px;text-align:center;">${escapeHtml(r.project || "")}</td>
           <td style="border:1px solid #999;padding:6px;white-space:pre-line;">
-            ${summary}
-            ${url}
-            <span> - ${escapeHtml(r.total_time || "")}h</span>
+            ${taskInner}
           </td>
         </tr>`;
     })
@@ -234,8 +258,15 @@ export function buildDailySheetText(opts: {
 }) {
   const lines = ["Date | In-Time | Out-Time | Total Time | Project | Task"];
   for (const r of opts.rows) {
-    let taskText = r.task_summary || r.task || "";
-    if (r.task_url) taskText += ` (${r.task_url})`;
+    let taskText = "";
+    if (r.task_commits && r.task_commits.length > 0) {
+      taskText = r.task_commits
+        .map((c) => (c.url ? `${c.summary} (${c.url})` : c.summary))
+        .join(" | ");
+    } else {
+      taskText = r.task_summary || r.task || "";
+      if (r.task_url) taskText += ` (${r.task_url})`;
+    }
     lines.push(
       `${r.date_display || ""} | ${r.in_time} | ${r.out_time} | ${r.total_time} | ${r.project} | ${taskText}`
     );
