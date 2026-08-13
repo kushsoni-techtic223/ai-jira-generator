@@ -28,14 +28,18 @@ import {
   loadEmailRecipients,
 } from "../lib/emailRecipients";
 import {
-  ManualExtraRow,
+  EditableSheetRow,
   SheetRow,
+  baseRowsToEditable,
   buildDailySheetHtml,
   buildDailySheetText,
+  draftToManualRow,
   extrasPayload,
-  mergeSheetRows,
+  insertEditableRow,
+  mergeManualsIntoBase,
   minutesToHhMm,
   parseDurationToMinutes,
+  renumberSheetRows,
   sumSheetMinutes,
 } from "../lib/dailySheet";
 
@@ -138,13 +142,10 @@ export default function LiveJiraBoard() {
   const [connectingToken, setConnectingToken] = useState(false);
   const [selectingSite, setSelectingSite] = useState(false);
   const [emailPreview, setEmailPreview] = useState<DailyEmailPreview | null>(null);
-  const [baseSheetRows, setBaseSheetRows] = useState<SheetRow[]>([]);
-  const [manualRows, setManualRows] = useState<ManualExtraRow[]>([]);
+  const [editableRows, setEditableRows] = useState<EditableSheetRow[]>([]);
   const [manualDraft, setManualDraft] = useState({
     task: "",
     project: "",
-    in_time: "",
-    out_time: "",
     total_time: "",
   });
   const [manualError, setManualError] = useState<string | null>(null);
@@ -158,8 +159,13 @@ export default function LiveJiraBoard() {
   const { setTotals } = timer;
 
   const sheetRows = useMemo(
-    () => mergeSheetRows(baseSheetRows, manualRows, emailDate),
-    [baseSheetRows, manualRows, emailDate]
+    () => renumberSheetRows(editableRows, emailDate),
+    [editableRows, emailDate]
+  );
+
+  const manualCount = useMemo(
+    () => sheetRows.filter((r) => r.manual).length,
+    [sheetRows]
   );
 
   const sheetTotalTime = useMemo(
@@ -442,18 +448,22 @@ export default function LiveJiraBoard() {
     setPreparingEmail(true);
     setError(null);
     try {
-      const extras = extrasPayload(manualRows);
+      const extras = extrasPayload(editableRows);
+      // Fetch base Jira rows only; we merge manuals locally to keep positions.
       const res = await axios.post<DailyEmailPreview>(
         `${API}/reports/daily-email/preview`,
         {
           date: emailDate,
           ...emailListPayload(emailTo, emailCc),
-          extra_rows: extras.length ? extras : undefined,
         },
         { headers: jiraAuthHeaders() }
       );
-      // Keep base rows without manual ones so we can re-merge locally.
-      setBaseSheetRows((res.data.rows || []).filter((r) => !r.manual));
+      const apiRows = (res.data.rows || []).filter((r) => !r.manual);
+      setEditableRows((prev) =>
+        prev.some((r) => r.manual)
+          ? mergeManualsIntoBase(apiRows, prev, emailDate)
+          : baseRowsToEditable(apiRows, emailDate)
+      );
       setEmailPreview(res.data);
       if (!emailTo.trim() && res.data.to?.length) {
         setEmailTo(res.data.to.join(", "));
@@ -472,40 +482,41 @@ export default function LiveJiraBoard() {
     }
   };
 
-  const addManualRow = () => {
+  const clearManualDraft = () => {
+    setManualDraft({
+      task: "",
+      project: "",
+      total_time: "",
+    });
+  };
+
+  const addManualRowAt = (atIndex: number) => {
     setManualError(null);
     const task = manualDraft.task.trim();
     if (!task) {
       setManualError("Enter what you worked on.");
       return;
     }
-    const mins = parseDurationToMinutes(manualDraft.total_time);
-    if (!mins) {
+    if (!parseDurationToMinutes(manualDraft.total_time)) {
       setManualError("Enter duration as H:MM (e.g. 1:30).");
       return;
     }
-    setManualRows((prev) => [
-      ...prev,
-      {
-        id: `manual-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-        task,
-        project: manualDraft.project.trim(),
-        in_time: manualDraft.in_time.trim(),
-        out_time: manualDraft.out_time.trim(),
-        total_time: minutesToHhMm(mins),
-      },
-    ]);
-    setManualDraft({
-      task: "",
-      project: "",
-      in_time: "",
-      out_time: "",
-      total_time: "",
-    });
+    const row = draftToManualRow(manualDraft, emailDate);
+    if (!row) {
+      setManualError("Enter task and duration as H:MM (e.g. 1:30).");
+      return;
+    }
+    setEditableRows((prev) => insertEditableRow(prev, row, atIndex, emailDate));
+    clearManualDraft();
   };
 
   const removeManualRow = (id: string) => {
-    setManualRows((prev) => prev.filter((r) => r.id !== id));
+    setEditableRows((prev) =>
+      renumberSheetRows(
+        prev.filter((r) => r.id !== id),
+        emailDate
+      )
+    );
   };
 
   const closeEmailPreview = () => {
@@ -517,7 +528,7 @@ export default function LiveJiraBoard() {
     setSendingEmail(true);
     setError(null);
     try {
-      const extras = extrasPayload(manualRows);
+      const extras = extrasPayload(sheetRows);
       const res = await axios.post(
         `${API}/reports/daily-email/send`,
         {
@@ -627,7 +638,7 @@ export default function LiveJiraBoard() {
         return;
       }
 
-      const extras = extrasPayload(manualRows);
+      const extras = extrasPayload(sheetRows);
       await axios.post(
         `${API}/reports/daily-email/open-mail-app`,
         {
@@ -1134,8 +1145,8 @@ export default function LiveJiraBoard() {
                 </h3>
                 <p className="mt-1 text-xs text-slate-600">
                   Date: {livePreview.date} | Total: {livePreview.total_time}h
-                  {manualRows.length > 0
-                    ? ` · ${manualRows.length} manual task${manualRows.length === 1 ? "" : "s"}`
+                  {manualCount > 0
+                    ? ` · ${manualCount} manual task${manualCount === 1 ? "" : "s"}`
                     : ""}
                 </p>
               </div>
@@ -1154,8 +1165,9 @@ export default function LiveJiraBoard() {
                 Add work not on Jira
               </p>
               <p className="mt-0.5 text-xs text-slate-600">
-                Extra tasks for this sheet only (not logged to Jira). Duration
-                example: <code className="rounded bg-amber-100 px-1">1:30</code>
+                Adds task + duration only — does not change In/Out of existing
+                timer rows. Duration example:{" "}
+                <code className="rounded bg-amber-100 px-1">1:30</code>
               </p>
               <div className="mt-2 flex flex-wrap items-end gap-2">
                 <label className="min-w-[12rem] flex-1 text-xs font-medium text-slate-700">
@@ -1200,68 +1212,23 @@ export default function LiveJiraBoard() {
                     className="mt-1 block w-full rounded-md border border-slate-300 px-2.5 py-1.5 text-sm"
                   />
                 </label>
-                <label className="w-28 text-xs font-medium text-slate-700">
-                  In
-                  <input
-                    type="text"
-                    value={manualDraft.in_time}
-                    onChange={(e) =>
-                      setManualDraft((d) => ({
-                        ...d,
-                        in_time: e.target.value,
-                      }))
-                    }
-                    placeholder="2:00 PM"
-                    className="mt-1 block w-full rounded-md border border-slate-300 px-2.5 py-1.5 text-sm"
-                  />
-                </label>
-                <label className="w-28 text-xs font-medium text-slate-700">
-                  Out
-                  <input
-                    type="text"
-                    value={manualDraft.out_time}
-                    onChange={(e) =>
-                      setManualDraft((d) => ({
-                        ...d,
-                        out_time: e.target.value,
-                      }))
-                    }
-                    placeholder="3:30 PM"
-                    className="mt-1 block w-full rounded-md border border-slate-300 px-2.5 py-1.5 text-sm"
-                  />
-                </label>
                 <button
                   type="button"
-                  onClick={addManualRow}
+                  onClick={() => addManualRowAt(0)}
+                  className="rounded-md border border-teal-700 bg-white px-3 py-1.5 text-sm font-semibold text-teal-800 hover:bg-teal-50"
+                >
+                  + Add at top
+                </button>
+                <button
+                  type="button"
+                  onClick={() => addManualRowAt(sheetRows.length)}
                   className="rounded-md bg-teal-800 px-3 py-1.5 text-sm font-semibold text-white hover:bg-teal-900"
                 >
-                  + Add row to sheet
+                  + Add at end
                 </button>
               </div>
               {manualError && (
                 <p className="mt-2 text-sm text-red-700">{manualError}</p>
-              )}
-              {manualRows.length > 0 && (
-                <ul className="mt-2 max-h-24 space-y-1 overflow-y-auto">
-                  {manualRows.map((row) => (
-                    <li
-                      key={row.id}
-                      className="flex flex-wrap items-center gap-2 rounded-md border border-amber-200 bg-white px-2.5 py-1.5 text-sm text-slate-800"
-                    >
-                      <span className="font-medium">{row.task}</span>
-                      <span className="text-slate-500">
-                        · {row.project || "Other"} · {row.total_time}h
-                      </span>
-                      <button
-                        type="button"
-                        onClick={() => removeManualRow(row.id)}
-                        className="ml-auto text-xs font-semibold text-red-700 hover:underline"
-                      >
-                        Remove
-                      </button>
-                    </li>
-                  ))}
-                </ul>
               )}
             </div>
 
@@ -1311,10 +1278,121 @@ export default function LiveJiraBoard() {
               </div>
 
               <div className="p-5">
-                <div
-                  className="prose max-w-none"
-                  dangerouslySetInnerHTML={{ __html: livePreview.html }}
-                />
+                <div className="overflow-x-auto rounded-lg border border-slate-200">
+                  <table className="min-w-full border-collapse text-sm">
+                    <thead>
+                      <tr className="bg-amber-300 text-slate-900">
+                        <th className="border border-slate-300 px-2 py-2 text-left">
+                          Date
+                        </th>
+                        <th className="border border-slate-300 px-2 py-2 text-left">
+                          In
+                        </th>
+                        <th className="border border-slate-300 px-2 py-2 text-left">
+                          Out
+                        </th>
+                        <th className="border border-slate-300 px-2 py-2 text-left">
+                          Total
+                        </th>
+                        <th className="border border-slate-300 px-2 py-2 text-left">
+                          Project
+                        </th>
+                        <th className="border border-slate-300 px-2 py-2 text-left">
+                          Task
+                        </th>
+                        <th className="border border-slate-300 px-2 py-2 text-left">
+                          Actions
+                        </th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {sheetRows.length === 0 ? (
+                        <tr>
+                          <td
+                            colSpan={7}
+                            className="border border-slate-200 px-3 py-4 text-center text-slate-500"
+                          >
+                            No rows yet. Add a manual task above, or refresh after
+                            logging time.
+                          </td>
+                        </tr>
+                      ) : (
+                        sheetRows.map((row, idx) => (
+                          <tr
+                            key={row.id}
+                            className={
+                              row.manual ? "bg-amber-50/80" : "bg-white"
+                            }
+                          >
+                            <td className="border border-slate-200 px-2 py-2">
+                              {row.date_display || ""}
+                            </td>
+                            <td className="border border-slate-200 px-2 py-2">
+                              {row.in_time}
+                            </td>
+                            <td className="border border-slate-200 px-2 py-2">
+                              {row.out_time}
+                            </td>
+                            <td className="border border-slate-200 px-2 py-2">
+                              {row.total_time}
+                            </td>
+                            <td className="border border-slate-200 px-2 py-2">
+                              {row.project}
+                            </td>
+                            <td className="border border-slate-200 px-2 py-2">
+                              <div className="whitespace-pre-line">
+                                {row.task_summary || row.task}
+                                {row.task_url ? (
+                                  <>
+                                    <br />
+                                    <a
+                                      href={row.task_url}
+                                      className="text-teal-700 underline"
+                                      target="_blank"
+                                      rel="noreferrer"
+                                    >
+                                      {row.task_url}
+                                    </a>
+                                  </>
+                                ) : null}
+                                <span> - {row.total_time}h</span>
+                              </div>
+                              {row.manual ? (
+                                <span className="mt-1 inline-block rounded bg-amber-200 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-amber-900">
+                                  Manual
+                                </span>
+                              ) : null}
+                            </td>
+                            <td className="border border-slate-200 px-2 py-2">
+                              <div className="flex flex-col gap-1">
+                                <button
+                                  type="button"
+                                  onClick={() => addManualRowAt(idx + 1)}
+                                  className="rounded border border-teal-300 bg-white px-2 py-1 text-xs font-semibold text-teal-800 hover:bg-teal-50"
+                                  title="Insert the draft task below this row"
+                                >
+                                  Insert below
+                                </button>
+                                {row.manual ? (
+                                  <button
+                                    type="button"
+                                    onClick={() => removeManualRow(row.id)}
+                                    className="rounded px-2 py-1 text-xs font-semibold text-red-700 hover:bg-red-50"
+                                  >
+                                    Remove
+                                  </button>
+                                ) : null}
+                              </div>
+                            </td>
+                          </tr>
+                        ))
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+                <p className="mt-3 text-sm font-semibold text-slate-800">
+                  Total: {sheetTotalTime}h
+                </p>
               </div>
             </div>
             <div className="flex shrink-0 flex-wrap items-center justify-end gap-3 border-t border-slate-200 bg-white px-5 py-4">

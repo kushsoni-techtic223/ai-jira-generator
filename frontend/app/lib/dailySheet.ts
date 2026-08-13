@@ -14,13 +14,13 @@ export type SheetRow = {
   manual?: boolean;
 };
 
-export type ManualExtraRow = {
+export type EditableSheetRow = SheetRow & {
   id: string;
+};
+
+export type ManualDraft = {
   task: string;
   project: string;
-  in_time: string;
-  out_time: string;
-  /** Duration as H:MM */
   total_time: string;
 };
 
@@ -71,51 +71,109 @@ function escapeHtml(value: string) {
     .replace(/"/g, "&quot;");
 }
 
-export function mergeSheetRows(
-  baseRows: SheetRow[],
-  extras: ManualExtraRow[],
+export function newRowId(prefix = "row") {
+  return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+}
+
+export function renumberSheetRows(
+  rows: EditableSheetRow[],
   sheetDateIso: string
-): SheetRow[] {
+): EditableSheetRow[] {
   const dateStr = formatDateDisplay(sheetDateIso);
   let prevDate = "";
-  const merged: SheetRow[] = [];
-
-  for (const r of baseRows) {
+  return rows.map((r, i) => {
     const date = r.date || dateStr;
     const date_display = date !== prevDate ? date : "";
     prevDate = date;
-    merged.push({
+    return {
       ...r,
+      sr: i + 1,
       date,
       date_display,
+    };
+  });
+}
+
+export function baseRowsToEditable(
+  rows: SheetRow[],
+  sheetDateIso: string
+): EditableSheetRow[] {
+  const mapped = rows
+    .filter((r) => !r.manual)
+    .map((r, i) => ({
+      ...r,
+      id: `base-${i}-${r.in_time}-${r.out_time}-${r.total_time}-${r.task_summary || r.task}`,
       task_summary: r.task_summary || r.task,
       manual: false,
-    });
-  }
+    }));
+  return renumberSheetRows(mapped, sheetDateIso);
+}
 
-  for (const extra of extras) {
-    const mins = parseDurationToMinutes(extra.total_time);
-    if (!mins || !extra.task.trim()) continue;
-    const total_time = minutesToHhMm(mins);
-    const date_display = dateStr !== prevDate ? dateStr : "";
-    prevDate = dateStr;
-    const task = extra.task.trim();
-    merged.push({
-      sr: merged.length + 1,
-      date: dateStr,
-      date_display,
-      in_time: extra.in_time.trim() || "—",
-      out_time: extra.out_time.trim() || "—",
-      total_time,
-      project: extra.project.trim() || "Other",
-      task: `${task} - ${total_time}h`,
-      task_summary: task,
-      task_url: null,
-      manual: true,
-    });
+/** Keep manual rows at their previous indices after a Jira refresh.
+ * Never mutates In/Out/Total of timer (non-manual) rows.
+ */
+export function mergeManualsIntoBase(
+  baseRows: SheetRow[],
+  previous: EditableSheetRow[],
+  sheetDateIso: string
+): EditableSheetRow[] {
+  const manuals = previous
+    .map((r, idx) => ({ row: r, idx }))
+    .filter((x) => x.row.manual)
+    .map(({ row, idx }) => ({
+      idx,
+      row: {
+        ...row,
+        // Manual rows never carry real clock times.
+        in_time: "—",
+        out_time: "—",
+      },
+    }));
+  let next = baseRowsToEditable(baseRows, sheetDateIso);
+  for (const { row, idx } of [...manuals].sort((a, b) => b.idx - a.idx)) {
+    const pos = Math.max(0, Math.min(idx, next.length));
+    next = [...next.slice(0, pos), row, ...next.slice(pos)];
   }
+  return renumberSheetRows(next, sheetDateIso);
+}
 
-  return merged.map((r, i) => ({ ...r, sr: i + 1 }));
+export function draftToManualRow(
+  draft: ManualDraft,
+  sheetDateIso: string
+): EditableSheetRow | null {
+  const task = draft.task.trim();
+  const mins = parseDurationToMinutes(draft.total_time);
+  if (!task || !mins) return null;
+  const total_time = minutesToHhMm(mins);
+  const date = formatDateDisplay(sheetDateIso);
+  return {
+    id: newRowId("manual"),
+    sr: 0,
+    date,
+    date_display: date,
+    // Never invent clock times — keep existing timer In/Out untouched.
+    in_time: "—",
+    out_time: "—",
+    total_time,
+    project: draft.project.trim() || "Other",
+    task: `${task} - ${total_time}h`,
+    task_summary: task,
+    task_url: null,
+    manual: true,
+  };
+}
+
+export function insertEditableRow(
+  rows: EditableSheetRow[],
+  row: EditableSheetRow,
+  atIndex: number,
+  sheetDateIso: string
+): EditableSheetRow[] {
+  const pos = Math.max(0, Math.min(atIndex, rows.length));
+  return renumberSheetRows(
+    [...rows.slice(0, pos), row, ...rows.slice(pos)],
+    sheetDateIso
+  );
 }
 
 export function buildDailySheetHtml(opts: {
@@ -192,14 +250,17 @@ export function buildDailySheetText(opts: {
   );
 }
 
-export function extrasPayload(extras: ManualExtraRow[]) {
-  return extras
-    .filter((e) => e.task.trim() && parseDurationToMinutes(e.total_time))
-    .map((e) => ({
-      task: e.task.trim(),
-      project: e.project.trim() || "Other",
-      in_time: e.in_time.trim() || undefined,
-      out_time: e.out_time.trim() || undefined,
-      total_time: minutesToHhMm(parseDurationToMinutes(e.total_time)!),
+/** Manual rows with insert positions for the backend (order-aware).
+ * Do not send In/Out — manual rows must not override timer clock times.
+ */
+export function extrasPayload(rows: EditableSheetRow[]) {
+  return rows
+    .map((r, insert_at) => ({ r, insert_at }))
+    .filter(({ r }) => r.manual && (r.task_summary || r.task)?.trim())
+    .map(({ r, insert_at }) => ({
+      task: (r.task_summary || r.task).trim(),
+      project: (r.project || "").trim() || "Other",
+      total_time: r.total_time,
+      insert_at,
     }));
 }

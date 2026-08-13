@@ -108,6 +108,11 @@ class ManualSheetRow(BaseModel):
     total_time: Optional[str] = Field(
         None, description="Duration as H:MM, e.g. 1:30"
     )
+    insert_at: Optional[int] = Field(
+        None,
+        ge=0,
+        description="0-based index in the final sheet (0 = top). Default: append.",
+    )
 
 
 class DailyEmailRequest(BaseModel):
@@ -1186,7 +1191,9 @@ def _build_daily_email_payload(
             }
         )
 
-    # Append manual tasks (work done without a Jira ticket / timer).
+    # Insert manual tasks (work done without a Jira ticket / timer).
+    # insert_at = 0-based final index (0 = top). Apply high→low so indices stay stable.
+    manual_inserts: list[tuple[int, dict[str, Any]]] = []
     for extra in req.extra_rows or []:
         task = (extra.task or "").strip()
         if not task:
@@ -1200,28 +1207,46 @@ def _build_daily_email_payload(
             raise jira.JiraConfigError(str(exc)) from exc
         total_seconds += sec
         date_str = target_day.strftime("%d/%m/%y")
-        date_display = date_str if date_str != prev_date else ""
-        prev_date = date_str
         project = (extra.project or "").strip() or "Other"
-        in_time = (extra.in_time or "").strip() or "—"
-        out_time = (extra.out_time or "").strip() or "—"
+        # Sheet-only manual rows never set/override clock times.
+        in_time = "—"
+        out_time = "—"
         total_time = _format_hhmm(sec)
-        idx = len(rows) + 1
-        rows.append(
-            {
-                "sr": idx,
-                "date": date_str,
-                "date_display": date_display,
-                "in_time": in_time,
-                "out_time": out_time,
-                "total_time": total_time,
-                "project": project,
-                "task": f"{task} - {total_time}h",
-                "task_summary": task,
-                "task_url": None,
-                "manual": True,
-            }
+        pos = (
+            len(rows)
+            if extra.insert_at is None
+            else max(0, int(extra.insert_at))
         )
+        manual_inserts.append(
+            (
+                pos,
+                {
+                    "sr": 0,
+                    "date": date_str,
+                    "date_display": "",
+                    "in_time": in_time,
+                    "out_time": out_time,
+                    "total_time": total_time,
+                    "project": project,
+                    "task": f"{task} - {total_time}h",
+                    "task_summary": task,
+                    "task_url": None,
+                    "manual": True,
+                },
+            )
+        )
+
+    for pos, row in sorted(manual_inserts, key=lambda x: x[0], reverse=True):
+        at = min(pos, len(rows))
+        rows.insert(at, row)
+
+    prev_date = ""
+    for idx, row in enumerate(rows, start=1):
+        row["sr"] = idx
+        date_str = row.get("date") or target_day.strftime("%d/%m/%y")
+        row["date"] = date_str
+        row["date_display"] = date_str if date_str != prev_date else ""
+        prev_date = date_str
 
     user_name = (
         session.get("user_name")
