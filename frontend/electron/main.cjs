@@ -395,6 +395,8 @@ function createWindow() {
   win = new BrowserWindow({
     width: 1400,
     height: 900,
+    title: "Daily Time Logger",
+    icon: path.join(__dirname, "icons", process.platform === "win32" ? "icon.png" : "icon.icns"),
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
@@ -402,6 +404,17 @@ function createWindow() {
       preload: preloadPath,
     },
   });
+
+  if (process.platform === "darwin") {
+    const dockIcon = path.join(__dirname, "icons", "icon.png");
+    if (fs.existsSync(dockIcon) && app.dock) {
+      try {
+        app.dock.setIcon(dockIcon);
+      } catch {
+        // ignore dock icon failures
+      }
+    }
+  }
 
   win.webContents.setWindowOpenHandler(({ url }) => {
     shell.openExternal(url);

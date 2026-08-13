@@ -228,7 +228,7 @@ def create_commit(
     }
 
 
-def push_to_remote(
+def sync_with_remote(
     repo_path: str,
     *,
     branch: str | None = None,
@@ -236,7 +236,171 @@ def push_to_remote(
     token: str | None = None,
 ) -> dict[str, Any]:
     """
+    Fetch remote and rebase local branch onto it so a following push can succeed.
+    Stashes dirty work briefly if needed. No-op when remote branch does not exist yet.
+    """
+    path = os.path.abspath(os.path.expanduser((repo_path or "").strip()))
+    info = inspect_repo(path)
+    target_branch = (branch or "").strip() or info["branch"]
+    if target_branch == "HEAD":
+        raise LocalGitError("Detached HEAD — checkout a branch before syncing.")
+
+    ensure_branch(path, target_branch, remote=remote)
+
+    remote_name = (remote or "origin").strip() or "origin"
+    try:
+        remote_url = _run_git(path, ["remote", "get-url", remote_name])
+    except LocalGitError as exc:
+        raise LocalGitError(
+            f"No git remote '{remote_name}'. Add a GitHub remote first."
+        ) from exc
+
+    full_name = _github_full_name_from_remote(remote_url)
+    tok = (token or "").strip()
+    quiet_env = {
+        "GIT_TERMINAL_PROMPT": "0",
+        "GCM_INTERACTIVE": "never",
+    }
+
+    fetch_source = remote_name
+    if tok and full_name:
+        fetch_source = f"https://x-access-token:{tok}@github.com/{full_name}.git"
+
+    tracking_ref = f"refs/remotes/{remote_name}/{target_branch}"
+    remote_exists = False
+    try:
+        _run_git(
+            path,
+            [
+                "fetch",
+                fetch_source,
+                f"+refs/heads/{target_branch}:{tracking_ref}",
+            ],
+            timeout=120,
+            env=quiet_env,
+        )
+        remote_exists = True
+    except LocalGitError as exc:
+        err = str(exc).lower()
+        # First push / branch only exists locally.
+        if any(
+            s in err
+            for s in (
+                "couldn't find remote ref",
+                "does not exist",
+                "not found",
+                "no such ref",
+                "fatal: couldn't find remote ref",
+            )
+        ):
+            return {
+                "ok": True,
+                "synced": False,
+                "reason": "remote_branch_missing",
+                "branch": target_branch,
+                "remote": remote_name,
+            }
+        raise LocalGitError(f"Could not sync from GitHub (fetch failed): {exc}") from exc
+
+    # Already up to date?
+    try:
+        ahead_behind = _run_git(
+            path,
+            [
+                "rev-list",
+                "--left-right",
+                "--count",
+                f"HEAD...{remote_name}/{target_branch}",
+            ],
+            env=quiet_env,
+        ).strip()
+        left, right = (ahead_behind.split() + ["0", "0"])[:2]
+        behind = int(right)
+        if behind <= 0:
+            return {
+                "ok": True,
+                "synced": True,
+                "rebased": False,
+                "up_to_date_with_remote": True,
+                "branch": target_branch,
+                "remote": remote_name,
+                "remote_exists": remote_exists,
+            }
+    except (LocalGitError, ValueError):
+        behind = 1
+
+    dirty = bool(_run_git(path, ["status", "--porcelain"]).strip())
+    stashed = False
+    if dirty:
+        try:
+            _run_git(
+                path,
+                ["stash", "push", "-u", "-m", "daily-time-logger-sync-before-push"],
+                env=quiet_env,
+            )
+            stashed = True
+        except LocalGitError as exc:
+            raise LocalGitError(
+                "Cannot sync with GitHub while you have uncommitted changes that "
+                f"could not be stashed: {exc}"
+            ) from exc
+
+    try:
+        _run_git(
+            path,
+            ["rebase", f"{remote_name}/{target_branch}"],
+            timeout=120,
+            env=quiet_env,
+        )
+    except LocalGitError as exc:
+        # Abort partial rebase so the repo is usable again.
+        try:
+            _run_git(path, ["rebase", "--abort"], env=quiet_env)
+        except LocalGitError:
+            pass
+        if stashed:
+            try:
+                _run_git(path, ["stash", "pop"], env=quiet_env)
+            except LocalGitError:
+                pass
+        raise LocalGitError(
+            "Could not sync with GitHub (rebase conflict). "
+            "Resolve conflicts in the repo, then try Push only again. "
+            f"Details: {exc}"
+        ) from exc
+
+    if stashed:
+        try:
+            _run_git(path, ["stash", "pop"], env=quiet_env)
+        except LocalGitError as exc:
+            raise LocalGitError(
+                "Synced with GitHub, but restoring your stashed local changes failed. "
+                f"Run `git stash pop` in the repo. Details: {exc}"
+            ) from exc
+
+    return {
+        "ok": True,
+        "synced": True,
+        "rebased": True,
+        "stashed": stashed,
+        "branch": target_branch,
+        "remote": remote_name,
+        "remote_exists": remote_exists,
+        "behind_before": behind,
+    }
+
+
+def push_to_remote(
+    repo_path: str,
+    *,
+    branch: str | None = None,
+    remote: str = "origin",
+    token: str | None = None,
+    sync_first: bool = True,
+) -> dict[str, Any]:
+    """
     Push current branch to GitHub (or configured remote).
+    By default syncs (fetch + rebase) first so push is not rejected when remote moved.
     Creates the remote branch on first push (-u) if it does not exist yet.
     Prefer OAuth/PAT token for github.com HTTPS auth; otherwise uses local git credentials/SSH.
     """
@@ -248,6 +412,15 @@ def push_to_remote(
 
     # Ensure local branch exists / is checked out before publishing to GitHub.
     branch_meta = ensure_branch(path, target_branch, remote=remote)
+
+    synced = None
+    if sync_first:
+        synced = sync_with_remote(
+            path,
+            branch=target_branch,
+            remote=remote,
+            token=token,
+        )
 
     remote_name = (remote or "origin").strip() or "origin"
     remote_url = ""
@@ -318,6 +491,9 @@ def push_to_remote(
         "branch_created_remote": not up_to_date or bool(branch_meta.get("created")),
         "dirty": bool(status.get("dirty")),
         "changed_files": int(status.get("changed_files") or 0),
+        "synced": bool(synced and synced.get("synced")),
+        "rebased": bool(synced and synced.get("rebased")),
+        "sync": synced,
     }
 
 

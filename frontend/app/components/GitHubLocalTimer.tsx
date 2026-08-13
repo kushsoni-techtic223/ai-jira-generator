@@ -255,6 +255,8 @@ export default function GitHubLocalTimer({
       changed_files?: number;
       branch_created_local?: boolean;
       branch_created_remote?: boolean;
+      synced?: boolean;
+      rebased?: boolean;
     } | null
   ) => {
     if (!pushed) {
@@ -269,6 +271,11 @@ export default function GitHubLocalTimer({
       : pushed.branch_created_local
         ? `Created branch & pushed to GitHub · ${dest}`
         : `Pushed to GitHub · ${dest}`;
+    if (pushed.rebased) {
+      msg = `Synced with GitHub, then pushed · ${dest}`;
+    } else if (pushed.synced) {
+      msg = `Synced & pushed to GitHub · ${dest}`;
+    }
     if (pushed.dirty) {
       msg += ` · ${pushed.changed_files || "some"} uncommitted file(s) still local`;
     }
@@ -344,6 +351,7 @@ export default function GitHubLocalTimer({
       );
       notePush(res.data.pushed || null);
       setCommitMessage("");
+      await refresh();
     } catch (err: any) {
       setError(err?.response?.data?.detail || err?.message || "Commit failed");
     } finally {
@@ -369,6 +377,7 @@ export default function GitHubLocalTimer({
         { headers: ghHeaders() }
       );
       notePush(res.data.pushed || null);
+      await refresh();
     } catch (err: any) {
       setError(err?.response?.data?.detail || err?.message || "Push failed");
     } finally {
@@ -668,7 +677,9 @@ export default function GitHubLocalTimer({
 
             <p className="mt-3 text-xs leading-relaxed text-emerald-800/75">
               Stages all changes (<code className="rounded bg-white/70 px-1">git add -A</code>
-              ), commits, then pushes the branch to origin on GitHub when enabled.
+              ), commits, then syncs with GitHub (fetch + rebase) and pushes when
+              enabled. <strong>Push only</strong> also syncs first so remote updates
+              are pulled before push.
             </p>
 
             {(lastCommit || lastPush) && (
